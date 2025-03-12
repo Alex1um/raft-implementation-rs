@@ -1,0 +1,8 @@
+version: '3'
+services:
+  multicast:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    deploy:
+      replicas: 3
