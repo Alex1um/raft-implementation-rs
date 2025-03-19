@@ -1,48 +1,86 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
+pub type Term = u64;
+pub type Index = u64;
+pub type NodeId = Uuid;
 
-type Term = u64;
-type Index = u64;
-
-
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 pub enum ServerState {
     Follower,
     Candidate,
     Leader,
 }
 
-
+#[derive(Serialize, Deserialize)]
 pub enum Command {
     Append(Vec<u8>),
 }
 
+#[derive(Serialize, Deserialize)]
+struct Entry {}
 
-struct LogEntry {
-    term: Term,
-    command: Command,
+#[derive(Serialize, Deserialize)]
+pub struct RequestVote {
+    pub term: Term,
+    pub candidate_id: NodeId,
+    pub last_log_index: Index,
+    pub last_log_term: Term,
 }
 
-
-struct NodeState {
-    current_term: Term,
-    voted_for: Option<u64>,
-    log: Vec<LogEntry>,
-    commit_index: Index,
-    last_applied: Index,
-    next_index: Vec<Index>,
-    match_index: Vec<Index>
-}
-
-impl NodeState {
-    fn new() -> NodeState {
-        NodeState {
-            current_term: 0,
-            voted_for: None,
-            log: Vec::new(),
-            commit_index: 0,
-            last_applied: 0,
-            next_index: Vec::new(),
-            match_index: Vec::new(),
+impl RequestVote {
+    pub fn new(
+        term: Term,
+        candidate_id: Uuid,
+        last_log_index: Index,
+        last_log_term: Term,
+    ) -> RequestVote {
+        RequestVote {
+            term,
+            candidate_id,
+            last_log_index,
+            last_log_term,
         }
     }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct AppendEntry {
+    pub term: Term,
+    pub leader_id: NodeId,
+    pub prev_log_index: Index,
+    pub prev_log_term: Term,
+    pub entries: Vec<Entry>,
+    pub leader_commit: Index,
+}
+
+impl AppendEntry {
+    pub fn heartbeat(
+        term: Term,
+        leader_id: Uuid,
+        prev_log_index: Index,
+        prev_log_term: Term,
+        leader_commit: Index,
+    ) -> AppendEntry {
+        AppendEntry {
+            term,
+            leader_id,
+            prev_log_index,
+            prev_log_term,
+            entries: Vec::new(),
+            leader_commit,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum MessageBody {
+    RequestVote(RequestVote),
+    AppendEntry(AppendEntry),
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Message {
+    pub term: Term,
+    pub body: MessageBody,
 }

@@ -69,7 +69,7 @@ pub async fn run_self_finder() -> (tokio::sync::mpsc::Receiver<std::net::SocketA
         .join_multicast_v4(MULTICAST_ADDR, BIND_ADDR)
         .expect("valid join IPv4 multicast group");
     socket
-        .set_multicast_loop_v4(true)
+        .set_multicast_loop_v4(false)
         .expect("setted loop option");
     let send_socket = Arc::new(socket);
     let receive_socket = send_socket.clone();
