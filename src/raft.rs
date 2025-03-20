@@ -4,22 +4,20 @@ use std::{net::SocketAddr, sync::Arc};
 
 use crate::consts::{HEARTBEAT_TIMEOUT, MAX_ELECTION_TIMEOUT, MIN_ELECTION_TIMEOUT};
 use crate::models::*;
-use std::collections::HashSet;
+use rand::prelude::*;
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
-use tokio::net::TcpSocket;
 use tokio::net::TcpStream;
-use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
-use tokio::time::Instant;
-use uuid::Uuid;
-use rand::prelude::*;
+
 
 async fn create_peers(
     mut receiver: Receiver<SocketAddr>,
     peers: Arc<Mutex<HashSet<IpAddr>>>,
-    sender: Sender<TcpStream>,
+    sender: Sender<(TcpStream, IpAddr)>,
 ) {
     while let Some(addr) = receiver.recv().await {
         let ip = addr.ip();
@@ -30,7 +28,7 @@ async fn create_peers(
         }
         if let Ok(stream) = TcpStream::connect(addr).await {
             sender
-                .send(stream)
+                .send((stream, ip))
                 .await
                 .unwrap_or_else(|e| print!("error: {}", e));
             peers.insert(ip);
@@ -39,7 +37,7 @@ async fn create_peers(
     }
 }
 
-async fn listen_for_peers(peers: Arc<Mutex<HashSet<IpAddr>>>, sender: Sender<TcpStream>) {
+async fn listen_for_peers(peers: Arc<Mutex<HashSet<IpAddr>>>, sender: Sender<(TcpStream, IpAddr)>) {
     let listener = TcpListener::bind("0.0.0.0:48667").await.unwrap();
     loop {
         let (socket, _) = listener.accept().await.unwrap();
@@ -51,7 +49,7 @@ async fn listen_for_peers(peers: Arc<Mutex<HashSet<IpAddr>>>, sender: Sender<Tcp
         }
         peers.insert(ip);
         sender
-            .send(socket)
+            .send((socket, ip))
             .await
             .unwrap_or_else(|e| print!("error: {}", e));
         println!("Connected to {}", addr);
@@ -59,22 +57,38 @@ async fn listen_for_peers(peers: Arc<Mutex<HashSet<IpAddr>>>, sender: Sender<Tcp
 }
 
 
-async fn receive_messages(
-    connection: &TcpStream,
-    buf: &mut [u8; 1024],
-) -> Result<Message, std::io::Error> {
-    connection.readable().await?;
-    let readed = connection.try_read(buf)?;
-    Ok(serde_json::from_slice::<Message>(&buf[0..readed]).unwrap())
+async fn send_all(connections: &mut HashMap<IpAddr, TcpStream>, message: &Message, connections_to_delete: &mut HashSet<IpAddr>) {
+    let data = serde_json::to_vec(message).unwrap();
+    for (ip, connection) in connections.iter_mut() {
+        match connection.write_all(&data).await {
+            Ok(_) => {},
+            Err(e) => {
+                println!("Error sending message: {}", e);
+                connections_to_delete.insert(*ip);
+            }
+        }
+    }
 }
+
+
+async fn remove_peers(ips: &mut HashSet<IpAddr>, connections: &mut HashMap<IpAddr, TcpStream>, peers: &Arc<Mutex<HashSet<IpAddr>>>) {
+    for ip in ips.iter() {
+        let mut peers_locked = peers.lock().await;
+        peers_locked.remove(ip);
+        connections.remove(ip);
+    }
+    ips.clear();
+}
+
 
 pub async fn run_raft(receiver: Receiver<SocketAddr>) {
     let peers = Arc::new(Mutex::new(HashSet::new()));
-    let (stream_sender, mut new_connections) = channel::<TcpStream>(3);
+    let (stream_sender, mut new_connections) = channel::<(TcpStream, IpAddr)>(3);
     tokio::spawn(listen_for_peers(peers.clone(), stream_sender.clone()));
     tokio::spawn(create_peers(receiver, peers.clone(), stream_sender));
 
-    let mut connections = Vec::<TcpStream>::new();
+    let mut connections = HashMap::<IpAddr, TcpStream>::new();
+    let mut connections_to_remove = HashSet::<IpAddr>::new();
     let mut buf = [0u8; 1024];
     let mut rng = rand::rng();
 
@@ -84,6 +98,7 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>) {
 
     let mut current_term = 0;
     let mut election_instant = Instant::now();
+    println!("My election timeout: {:#?}", election_timeout);
     let mut sended_messages = Vec::<Message>::new();
 
     let mut self_votes = 0;
@@ -93,8 +108,9 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>) {
         // setup new connections
         loop {
             match new_connections.try_recv() {
-                Ok(stream) => {
-                    connections.push(stream);
+                Ok((stream, ip)) => {
+                    println!("new connection {}", ip);
+                    connections.insert(ip, stream);
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     break 'main;
@@ -102,21 +118,18 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>) {
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                     break;
                 }
-            } 
+            }
         }
         // receive messages
-        self_votes = 0;
-        for connection in &connections {
-            match receive_messages(connection, &mut buf).await {
-                std::io::Result::Ok(msg) => {
-                    if msg.term > current_term {
-                        current_term = msg.term;
-                        state = ServerState::Follower;
-                        election_instant = Instant::now();
-                    } else if msg.term < current_term {
-                        continue;
-                    }
-                    match msg.body {
+        for (ip, connection) in connections.iter_mut() {
+            let received = connection.try_read(&mut buf);
+            match received {
+                Ok(0) => {
+                    println!("Closing connection to {}", ip);
+                    connections_to_remove.insert(*ip);
+                }
+                Ok(readed) => match serde_json::from_slice::<Message>(&buf[0..readed]) {
+                    Ok(message) => match message.body {
                         MessageBody::AppendEntry(AppendEntry { .. }) => {
                             if state == ServerState::Candidate {
                                 state = ServerState::Follower;
@@ -130,70 +143,59 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>) {
                             total_votes += 1;
                         }
                     }
+                    Err(e) => println!("Error deserializing message: {}", e),
                 }
-                std::io::Result::Err(e) => match e.kind() {
-                    std::io::ErrorKind::WouldBlock => {
-                        continue;
-                    }
+                Err(e) => match e.kind() {
+                    std::io::ErrorKind::WouldBlock => continue,
                     _ => {
-                        println!("error: {}", e);
-                        continue;
+                        println!("Error receiving message: {}", e);
+                        connections_to_remove.insert(*ip);
                     }
-                },
+                    
+                }
             }
         }
         // Do my work
         match state {
             ServerState::Follower => {
-                if Instant::now()
-                    .duration_since(election_instant)
-                    > election_timeout
-                {
+                if Instant::now().duration_since(election_instant) > election_timeout {
                     println!("I am the candidate!");
                     state = ServerState::Candidate;
+                    total_votes = 0;
+                    self_votes = 0;
                 }
             }
             ServerState::Candidate => {
                 if self_votes > total_votes / 2 {
                     println!("I am the leader!");
                     state = ServerState::Leader;
-                } else if Instant::now()
-                    .duration_since(election_instant)
-                    > election_timeout
-                {
+                } else if Instant::now().duration_since(election_instant) > election_timeout {
                     current_term += 1;
                     election_instant = Instant::now();
-                    let vote = RequestVote {
+                    let msg = Message {
                         term: current_term,
-                        candidate_id: my_id,
-                        last_log_index: 0,
-                        last_log_term: 0,
+                        body: MessageBody::RequestVote(RequestVote {
+                            term: current_term,
+                            candidate_id: my_id,
+                            last_log_index: 0,
+                            last_log_term: 0,
+                        }),
                     };
-                    let serialized = serde_json::to_vec(&vote).unwrap();
-                    for connection in &mut connections {
-                        match connection.write_all(&serialized).await {
-                            std::io::Result::Ok(_) => {}
-                            std::io::Result::Err(e) => {
-                                println!("error while sending vote: {}", e);
-                                continue;
-                            }
-                        }
-                    }
+                    send_all(&mut connections, &msg, &mut connections_to_remove).await;
+                    total_votes = 1;
+                    self_votes = 1;
                 }
             }
             ServerState::Leader => {
-                let heartbeat = AppendEntry::heartbeat(current_term, my_id, 0, 0, 0);
-                let serialized = serde_json::to_vec(&heartbeat).unwrap();
-                for connection in &mut connections {
-                    match connection.write_all(&serialized).await {
-                        std::io::Result::Ok(_) => {}
-                        std::io::Result::Err(e) => {
-                            println!("error while sending heartbeat: {}", e);
-                            continue;
-                        }
-                    }
-                }
+                let heartbeat = Message::new(
+                    current_term,
+                    MessageBody::AppendEntry(AppendEntry::heartbeat(current_term, my_id, 0, 0, 0)),
+                );
+                send_all(&mut connections, &heartbeat, &mut connections_to_remove).await;
             }
         }
+        remove_peers(&mut connections_to_remove, &mut connections, &peers).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    println!("Done.");
 }

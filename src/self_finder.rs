@@ -45,6 +45,7 @@ async fn receive_self(receive_socket: Arc<UdpSocket>, sender: mpsc::Sender<Socke
                     println!("current copies: {:?}", copies.keys());
                 }
                 std::collections::hash_map::Entry::Occupied(mut e) => {
+                    sender.send(addr).await.expect("valid send");
                     e.insert(Instant::now());
                 }
             },

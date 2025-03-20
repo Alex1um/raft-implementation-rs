@@ -5,7 +5,7 @@ pub type Term = u64;
 pub type Index = u64;
 pub type NodeId = Uuid;
 
-#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub enum ServerState {
     Follower,
     Candidate,
@@ -83,4 +83,11 @@ pub enum MessageBody {
 pub struct Message {
     pub term: Term,
     pub body: MessageBody,
+}
+
+
+impl Message {
+    pub fn new(term: Term, body: MessageBody) -> Message {
+        Message { term, body }
+    }
 }
