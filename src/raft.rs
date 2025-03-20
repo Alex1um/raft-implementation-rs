@@ -13,7 +13,6 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 
-
 async fn create_peers(
     mut receiver: Receiver<SocketAddr>,
     peers: Arc<Mutex<HashSet<IpAddr>>>,
@@ -56,12 +55,15 @@ async fn listen_for_peers(peers: Arc<Mutex<HashSet<IpAddr>>>, sender: Sender<(Tc
     }
 }
 
-
-async fn send_all(connections: &mut HashMap<IpAddr, TcpStream>, message: &Message, connections_to_delete: &mut HashSet<IpAddr>) {
+async fn send_all(
+    connections: &mut HashMap<IpAddr, TcpStream>,
+    message: &Message,
+    connections_to_delete: &mut HashSet<IpAddr>,
+) {
     let data = serde_json::to_vec(message).unwrap();
     for (ip, connection) in connections.iter_mut() {
         match connection.write_all(&data).await {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) => {
                 println!("Error sending message: {}", e);
                 connections_to_delete.insert(*ip);
@@ -70,8 +72,11 @@ async fn send_all(connections: &mut HashMap<IpAddr, TcpStream>, message: &Messag
     }
 }
 
-
-async fn remove_peers(ips: &mut HashSet<IpAddr>, connections: &mut HashMap<IpAddr, TcpStream>, peers: &Arc<Mutex<HashSet<IpAddr>>>) {
+async fn remove_peers(
+    ips: &mut HashSet<IpAddr>,
+    connections: &mut HashMap<IpAddr, TcpStream>,
+    peers: &Arc<Mutex<HashSet<IpAddr>>>,
+) {
     for ip in ips.iter() {
         let mut peers_locked = peers.lock().await;
         peers_locked.remove(ip);
@@ -79,7 +84,6 @@ async fn remove_peers(ips: &mut HashSet<IpAddr>, connections: &mut HashMap<IpAdd
     }
     ips.clear();
 }
-
 
 pub async fn run_raft(receiver: Receiver<SocketAddr>) {
     let peers = Arc::new(Mutex::new(HashSet::new()));
@@ -99,7 +103,6 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>) {
     let mut current_term = 0;
     let mut election_instant = Instant::now();
     println!("My election timeout: {:#?}", election_timeout);
-    let mut sended_messages = Vec::<Message>::new();
 
     let mut self_votes = 0;
     let mut total_votes = 0;
@@ -129,30 +132,38 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>) {
                     connections_to_remove.insert(*ip);
                 }
                 Ok(readed) => match serde_json::from_slice::<Message>(&buf[0..readed]) {
-                    Ok(message) => match message.body {
-                        MessageBody::AppendEntry(AppendEntry { .. }) => {
-                            if state == ServerState::Candidate {
-                                state = ServerState::Follower;
-                            }
+                    Ok(message) => {
+                        if message.term > current_term {
+                            current_term = message.term;
+                            state = ServerState::Follower;
                             election_instant = Instant::now();
+                        } else if message.term < current_term {
+                            continue;
                         }
-                        MessageBody::RequestVote(RequestVote { candidate_id, .. }) => {
-                            if candidate_id == my_id {
-                                self_votes += 1;
+                        match message.body {
+                            MessageBody::AppendEntry(AppendEntry { .. }) => {
+                                if state == ServerState::Candidate {
+                                    state = ServerState::Follower;
+                                }
+                                election_instant = Instant::now();
                             }
-                            total_votes += 1;
+                            MessageBody::RequestVote(RequestVote { candidate_id, .. }) => {
+                                if candidate_id == my_id {
+                                    self_votes += 1;
+                                }
+                                total_votes += 1;
+                            }
                         }
                     }
                     Err(e) => println!("Error deserializing message: {}", e),
-                }
+                },
                 Err(e) => match e.kind() {
                     std::io::ErrorKind::WouldBlock => continue,
                     _ => {
                         println!("Error receiving message: {}", e);
                         connections_to_remove.insert(*ip);
                     }
-                    
-                }
+                },
             }
         }
         // Do my work
@@ -181,9 +192,9 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>) {
                             last_log_term: 0,
                         }),
                     };
+                    total_votes += 1;
+                    self_votes += 1;
                     send_all(&mut connections, &msg, &mut connections_to_remove).await;
-                    total_votes = 1;
-                    self_votes = 1;
                 }
             }
             ServerState::Leader => {
