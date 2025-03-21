@@ -141,13 +141,13 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>) {
                             continue;
                         }
                         match message.body {
-                            MessageBody::AppendEntry(AppendEntry { .. }) => {
+                            MessageBody::AppendEntry { .. } => {
                                 if state == ServerState::Candidate {
                                     state = ServerState::Follower;
                                 }
                                 election_instant = Instant::now();
                             }
-                            MessageBody::RequestVote(RequestVote { candidate_id, .. }) => {
+                            MessageBody::RequestVote { candidate_id, .. } => {
                                 if candidate_id == my_id {
                                     self_votes += 1;
                                 }
@@ -183,25 +183,14 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>) {
                 } else if Instant::now().duration_since(election_instant) > election_timeout {
                     current_term += 1;
                     election_instant = Instant::now();
-                    let msg = Message {
-                        term: current_term,
-                        body: MessageBody::RequestVote(RequestVote {
-                            term: current_term,
-                            candidate_id: my_id,
-                            last_log_index: 0,
-                            last_log_term: 0,
-                        }),
-                    };
+                    let msg = Message::new_request_vote(current_term, my_id, 0, 0);
                     total_votes += 1;
                     self_votes += 1;
                     send_all(&mut connections, &msg, &mut connections_to_remove).await;
                 }
             }
             ServerState::Leader => {
-                let heartbeat = Message::new(
-                    current_term,
-                    MessageBody::AppendEntry(AppendEntry::heartbeat(current_term, my_id, 0, 0, 0)),
-                );
+                let heartbeat = Message::new_heartbeat(current_term, my_id, 0, 0, 0);
                 send_all(&mut connections, &heartbeat, &mut connections_to_remove).await;
             }
         }

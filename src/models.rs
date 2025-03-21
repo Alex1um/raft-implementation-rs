@@ -17,66 +17,30 @@ pub enum Command {
     Append(Vec<u8>),
 }
 
-#[derive(Serialize, Deserialize)]
-struct Entry {}
 
 #[derive(Serialize, Deserialize)]
-pub struct RequestVote {
-    pub term: Term,
-    pub candidate_id: NodeId,
-    pub last_log_index: Index,
-    pub last_log_term: Term,
+pub struct Entry {
+    term: Term,
+    command: Command,
 }
 
-impl RequestVote {
-    pub fn new(
-        term: Term,
-        candidate_id: Uuid,
-        last_log_index: Index,
-        last_log_term: Term,
-    ) -> RequestVote {
-        RequestVote {
-            term,
-            candidate_id,
-            last_log_index,
-            last_log_term,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct AppendEntry {
-    pub term: Term,
-    pub leader_id: NodeId,
-    pub prev_log_index: Index,
-    pub prev_log_term: Term,
-    pub entries: Vec<Entry>,
-    pub leader_commit: Index,
-}
-
-impl AppendEntry {
-    pub fn heartbeat(
-        term: Term,
-        leader_id: Uuid,
-        prev_log_index: Index,
-        prev_log_term: Term,
-        leader_commit: Index,
-    ) -> AppendEntry {
-        AppendEntry {
-            term,
-            leader_id,
-            prev_log_index,
-            prev_log_term,
-            entries: Vec::new(),
-            leader_commit,
-        }
-    }
-}
 
 #[derive(Serialize, Deserialize)]
 pub enum MessageBody {
-    RequestVote(RequestVote),
-    AppendEntry(AppendEntry),
+    RequestVote {
+        term: Term,
+        candidate_id: NodeId,
+        last_log_index: Index,
+        last_log_term: Term,
+    },
+    AppendEntry {
+        term: Term,
+        leader_id: NodeId,
+        prev_log_index: Index,
+        prev_log_term: Term,
+        entries: Vec<Entry>,
+        leader_commit: Index,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -85,9 +49,44 @@ pub struct Message {
     pub body: MessageBody,
 }
 
-
 impl Message {
     pub fn new(term: Term, body: MessageBody) -> Message {
         Message { term, body }
     }
+
+    pub fn new_heartbeat(
+        term: Term,
+        leader_id: Uuid,
+        prev_log_index: Index,
+        prev_log_term: Term,
+        leader_commit: Index,
+    ) -> Message {
+        Message {
+            term,
+            body: MessageBody::AppendEntry {
+                term,
+                leader_id,
+                prev_log_index,
+                prev_log_term,
+                entries: Vec::new(),
+                leader_commit,
+            },
+        }
+    }
+
+    pub fn new_request_vote(term: Term, candidate_id: Uuid, last_log_index: Index, last_log_term: Term) -> Message {
+        Message {
+            term,
+            body: MessageBody::RequestVote {
+                term,
+                candidate_id,
+                last_log_index,
+                last_log_term,
+            },
+        }
+    }
+}
+
+struct EntryToReplicate {
+    
 }
