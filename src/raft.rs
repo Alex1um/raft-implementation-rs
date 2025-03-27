@@ -128,7 +128,8 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                 }
             }
         }
-        if connections.len() < MIN_NODES {
+        if connections.len() < MIN_NODES - 1 {
+            println!("not enough connections: {}", connections.len());
             continue;
         }
         // receive messages
@@ -145,6 +146,7 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                             current_term = message.term;
                             state = ServerState::Follower;
                             election_instant = Instant::now();
+                            println!("I am the follower!");
                         } else if message.term < current_term {
                             continue;
                         }
@@ -152,6 +154,7 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                             MessageBody::AppendEntry { .. } => {
                                 if state == ServerState::Candidate {
                                     state = ServerState::Follower;
+                                    println!("I am the follower!");
                                 }
                                 election_instant = Instant::now();
                             }
