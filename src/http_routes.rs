@@ -1,4 +1,4 @@
-use rocket::{get, launch, routes};
+use rocket::{get, routes};
 use std::process;
 use tokio;
 use rocket::response::content;
@@ -15,7 +15,6 @@ fn index() -> content::RawHtml<&'static str> {
 #[get("/stop")]
 fn stop() -> &'static str {
     process::exit(0);
-    "Ok"
 }
 
 pub async fn rocket() -> tokio::task::JoinHandle<()> {

@@ -1,6 +1,6 @@
 use crate::consts::{INTERVAL, TIMEOUT, MULTICAST_ADDR, MULTICAST_PORT, BIND_ADDR, BIND_PORT};
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio;

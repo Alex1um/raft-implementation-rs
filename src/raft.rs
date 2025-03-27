@@ -2,10 +2,9 @@ use std::net::IpAddr;
 use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
 
-use crate::consts::{HEARTBEAT_TIMEOUT, MAX_ELECTION_TIMEOUT, MIN_ELECTION_TIMEOUT, MIN_NODES};
+use crate::consts::{MAX_ELECTION_TIMEOUT, MIN_ELECTION_TIMEOUT, MIN_NODES};
 use crate::models::*;
 use rand::prelude::*;
-use rocket::futures::FutureExt;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;

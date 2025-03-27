@@ -1,4 +1,4 @@
-use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::sync::mpsc::{Receiver, channel};
 
 
 pub async fn setup_signal_handler() -> (tokio::task::JoinHandle<()>, Receiver<()>) {
