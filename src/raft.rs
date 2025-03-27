@@ -2,9 +2,10 @@ use std::net::IpAddr;
 use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
 
-use crate::consts::{HEARTBEAT_TIMEOUT, MAX_ELECTION_TIMEOUT, MIN_ELECTION_TIMEOUT};
+use crate::consts::{HEARTBEAT_TIMEOUT, MAX_ELECTION_TIMEOUT, MIN_ELECTION_TIMEOUT, MIN_NODES};
 use crate::models::*;
 use rand::prelude::*;
+use rocket::futures::FutureExt;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
@@ -85,7 +86,7 @@ async fn remove_peers(
     ips.clear();
 }
 
-pub async fn run_raft(receiver: Receiver<SocketAddr>) {
+pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Receiver<()>) {
     let peers = Arc::new(Mutex::new(HashSet::new()));
     let (stream_sender, mut new_connections) = channel::<(TcpStream, IpAddr)>(3);
     tokio::spawn(listen_for_peers(peers.clone(), stream_sender.clone()));
@@ -108,6 +109,10 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>) {
     let mut total_votes = 0;
 
     'main: loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Ok(_) = signal_receiver.try_recv() {
+            break;
+        }
         // setup new connections
         loop {
             match new_connections.try_recv() {
@@ -122,6 +127,9 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>) {
                     break;
                 }
             }
+        }
+        if connections.len() < MIN_NODES {
+            continue;
         }
         // receive messages
         for (ip, connection) in connections.iter_mut() {
@@ -195,7 +203,6 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>) {
             }
         }
         remove_peers(&mut connections_to_remove, &mut connections, &peers).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     println!("Done.");
 }
