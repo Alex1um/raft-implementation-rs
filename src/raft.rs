@@ -5,6 +5,9 @@ use std::{net::SocketAddr, sync::Arc};
 use crate::consts::{MAX_ELECTION_TIMEOUT, MIN_ELECTION_TIMEOUT, MIN_NODES};
 use crate::models::*;
 use rand::prelude::*;
+use rand::seq::index;
+use rocket::http::Iter;
+use uuid::Uuid;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
@@ -85,6 +88,42 @@ async fn remove_peers(
     ips.clear();
 }
 
+async fn process_replication<'a>(
+    log: &Vec<Entry>,
+    connections: &mut HashMap<IpAddr, TcpStream>,
+    connections_to_delete: &mut HashSet<IpAddr>,
+    next_index: &mut HashMap<IpAddr, Index>,
+    leader_id: Uuid,
+    term: Term,
+    prev_term: Term,
+    prev_index: Index,
+    commit_index: Index
+) {
+    let last_log_index = log.len() as Index - 1;
+    for (ip, connection) in connections.iter_mut() {
+        let index = next_index.entry(*ip).or_insert(0);
+        if last_log_index > *index {
+            let entries = log[*index as usize..].to_vec();
+            let message = Message::new(term, MessageBody::AppendEntry {
+                term,
+                leader_id,
+                prev_log_index: prev_index,
+                prev_log_term: prev_term,
+                entries,
+                leader_commit: commit_index
+            });
+            let data = serde_json::to_vec(&message).unwrap();
+            match connection.write_all(&data).await {
+                Ok(_) => {}
+                Err(e) => {
+                    println!("Error sending message: {}", e);
+                    connections_to_delete.insert(*ip);
+                }
+            }
+        }
+    }
+}
+
 pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Receiver<()>) {
     let peers = Arc::new(Mutex::new(HashSet::new()));
     let (stream_sender, mut new_connections) = channel::<(TcpStream, IpAddr)>(3);
@@ -102,7 +141,14 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
 
     let mut current_term = 0;
     let mut election_instant = Instant::now();
+    let mut log = Vec::<Entry>::new();
     println!("My election timeout: {:#?}", election_timeout);
+    
+    let mut commit_index = 0; // index of highest log entry known to be commited
+    let mut last_applied = 0; // index of highest log entry applied to state machine
+
+    let mut next_index = HashMap::<IpAddr, Index>::new();
+    let mut match_index = HashMap::<IpAddr, Index>::new();
 
     let mut self_votes = 0;
     let mut total_votes = 0;
@@ -150,10 +196,18 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                             continue;
                         }
                         match message.body {
-                            MessageBody::AppendEntry { .. } => {
-                                if state == ServerState::Candidate {
-                                    state = ServerState::Follower;
-                                    println!("I am the follower!");
+                            MessageBody::AppendEntry { mut entries, .. } => {
+                                match state {
+                                    ServerState::Leader => {
+                                        commit_index = log.len() as Index - 1;
+                                        log.append(&mut entries);
+                                        println!("I am the leader!");
+                                    }
+                                    ServerState::Candidate => {
+                                        println!("I am the candidate!");
+                                        state = ServerState::Follower;
+                                    }
+                                    _ => {}
                                 }
                                 election_instant = Instant::now();
                             }
@@ -162,6 +216,16 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                                     self_votes += 1;
                                 }
                                 total_votes += 1;
+                            }
+                            MessageBody::AppendEntryResponse { success} => {
+                                if state == ServerState::Leader {
+                                    if success {
+                                        next_index.insert(*ip, log.len() as Index);
+                                        match_index.insert(*ip, log.len() as Index);
+                                    } else {
+                                        next_index.entry(*ip).and_modify(|e| *e -= 1);
+                                    }
+                                }
                             }
                         }
                     }
@@ -204,6 +268,17 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                 send_all(&mut connections, &heartbeat, &mut connections_to_remove).await;
             }
         }
+        process_replication(
+            &log,
+            &mut connections,
+            &mut connections_to_remove,
+            &mut next_index,
+            my_id,
+            current_term,
+            current_term - 1,
+            last_applied,
+            commit_index,
+        ).await;
         remove_peers(&mut connections_to_remove, &mut connections, &peers).await;
     }
     println!("Done.");

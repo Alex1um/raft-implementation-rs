@@ -12,16 +12,32 @@ pub enum ServerState {
     Leader,
 }
 
-#[derive(Serialize, Deserialize)]
-pub enum Command {
-    Append(Vec<u8>),
+
+pub struct State {
+
 }
 
 
-#[derive(Serialize, Deserialize)]
+impl State {
+    pub fn new() -> State {
+        State {}
+    }
+
+    pub fn apply_entry(&mut self, entry: &Entry) {
+        
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub enum Command {
+}
+
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Entry {
     term: Term,
     command: Command,
+    index: Index
 }
 
 
@@ -40,6 +56,9 @@ pub enum MessageBody {
         prev_log_term: Term,
         entries: Vec<Entry>,
         leader_commit: Index,
+    },
+    AppendEntryResponse {
+        success: bool,
     },
 }
 
@@ -85,8 +104,11 @@ impl Message {
             },
         }
     }
-}
 
-struct EntryToReplicate {
-    
+    pub fn new_append_entry_response(term: Term, success: bool) -> Message {
+        Message {
+            term,
+            body: MessageBody::AppendEntryResponse { success },
+        }
+    }
 }
