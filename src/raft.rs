@@ -2,12 +2,11 @@ use std::net::IpAddr;
 use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
 
-use crate::consts::{MAX_ELECTION_TIMEOUT, MIN_ELECTION_TIMEOUT, MIN_NODES};
+use crate::consts::{HEARTBEAT_INTERVAL, MAX_ELECTION_TIMEOUT, MIN_ELECTION_TIMEOUT, MIN_NODES};
 use crate::models::*;
-use rand::prelude::*;
 use rand::seq::index;
+use rand::{TryCryptoRng, prelude::*};
 use rocket::http::Iter;
-use uuid::Uuid;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
@@ -15,6 +14,7 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
+use uuid::Uuid;
 
 async fn create_peers(
     mut receiver: Receiver<SocketAddr>,
@@ -92,26 +92,31 @@ async fn process_replication<'a>(
     log: &Vec<Entry>,
     connections: &mut HashMap<IpAddr, TcpStream>,
     connections_to_delete: &mut HashSet<IpAddr>,
+    last_heartbeats: &mut HashMap<IpAddr, Instant>,
     next_index: &mut HashMap<IpAddr, Index>,
     leader_id: Uuid,
-    term: Term,
-    prev_term: Term,
-    prev_index: Index,
-    commit_index: Index
+    current_term: Term,
+    prev_log_term: Term,
+    prev_log_index: Index,
+    commit_index: Index,
 ) {
     let last_log_index = log.len() as Index - 1;
+    let mut heartbeat: Option<Vec<u8>> = None;
     for (ip, connection) in connections.iter_mut() {
         let index = next_index.entry(*ip).or_insert(0);
         if last_log_index > *index {
             let entries = log[*index as usize..].to_vec();
-            let message = Message::new(term, MessageBody::AppendEntry {
-                term,
-                leader_id,
-                prev_log_index: prev_index,
-                prev_log_term: prev_term,
-                entries,
-                leader_commit: commit_index
-            });
+            let message = Message::new(
+                current_term,
+                MessageBody::AppendEntry {
+                    term: current_term,
+                    leader_id,
+                    prev_log_index,
+                    prev_log_term,
+                    entries,
+                    leader_commit: commit_index,
+                },
+            );
             let data = serde_json::to_vec(&message).unwrap();
             match connection.write_all(&data).await {
                 Ok(_) => {}
@@ -120,7 +125,42 @@ async fn process_replication<'a>(
                     connections_to_delete.insert(*ip);
                 }
             }
+        } else if last_heartbeats
+            .entry(*ip)
+            .or_insert(Instant::now())
+            .elapsed()
+            > HEARTBEAT_INTERVAL
+        {
+            let data = heartbeat.get_or_insert(
+                serde_json::to_vec(&Message::new_heartbeat(
+                    current_term,
+                    leader_id,
+                    prev_log_index,
+                    prev_log_term,
+                    commit_index,
+                ))
+                .unwrap(),
+            );
+            if let Err(e) = connection.write_all(data).await {
+                println!("Error sending message: {}", e);
+                connections_to_delete.insert(*ip);
+            } else {
+                last_heartbeats.insert(*ip, Instant::now());
+            }
         }
+    }
+}
+
+async fn reply_to_append_entry_response(
+    connection: &mut TcpStream,
+    connection_ip: &IpAddr,
+    term: Term,
+    success: bool,
+    connections_to_delete: &mut HashSet<IpAddr>,
+) {
+    let data = serde_json::to_vec(&Message::new_append_entry_response(term, success)).unwrap();
+    if let Err(e) = connection.write_all(&data).await {
+        connections_to_delete.insert(*connection_ip);
     }
 }
 
@@ -134,6 +174,8 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
     let mut connections_to_remove = HashSet::<IpAddr>::new();
     let mut buf = [0u8; 1024];
     let mut rng = rand::rng();
+    let mut inner_state = InnerState::new();
+    let mut last_heartbeats: HashMap<IpAddr, Instant> = HashMap::new();
 
     let election_timeout = rng.random_range(MIN_ELECTION_TIMEOUT..=MAX_ELECTION_TIMEOUT);
     let mut state = ServerState::Follower;
@@ -143,7 +185,7 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
     let mut election_instant = Instant::now();
     let mut log = Vec::<Entry>::new();
     println!("My election timeout: {:#?}", election_timeout);
-    
+
     let mut commit_index = 0; // index of highest log entry known to be commited
     let mut last_applied = 0; // index of highest log entry applied to state machine
 
@@ -207,26 +249,44 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                                         println!("I am the candidate!");
                                         state = ServerState::Follower;
                                     }
-                                    _ => {}
+                                    ServerState::Follower => {
+                                        reply_to_append_entry_response(
+                                            connection,
+                                            ip,
+                                            message.term,
+                                            true,
+                                            &mut connections_to_remove,
+                                        )
+                                        .await;
+                                    }
                                 }
                                 election_instant = Instant::now();
                             }
-                            MessageBody::RequestVote { candidate_id, .. } => {
-                                if candidate_id == my_id {
+                            MessageBody::RequestVote {
+                                candidate_id,
+                                last_log_index,
+                                last_log_term,
+                                ..
+                            } => {
+                                if candidate_id == my_id
+                                    && last_log_index == log.len() as Index - 1
+                                    && last_log_term == log[log.len() - 1].term
+                                {
                                     self_votes += 1;
                                 }
                                 total_votes += 1;
                             }
-                            MessageBody::AppendEntryResponse { success} => {
-                                if state == ServerState::Leader {
-                                    if success {
-                                        next_index.insert(*ip, log.len() as Index);
-                                        match_index.insert(*ip, log.len() as Index);
-                                    } else {
-                                        next_index.entry(*ip).and_modify(|e| *e -= 1);
-                                    }
+                            MessageBody::AppendEntryResponse { success }
+                                if state == ServerState::Leader =>
+                            {
+                                if success {
+                                    next_index.insert(*ip, log.len() as Index);
+                                    match_index.insert(*ip, log.len() as Index);
+                                } else {
+                                    next_index.entry(*ip).and_modify(|e| *e -= 1);
                                 }
                             }
+                            _ => {}
                         }
                     }
                     Err(e) => println!("Error deserializing message: {}", e),
@@ -239,6 +299,12 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                     }
                 },
             }
+        }
+        if commit_index > last_applied {
+            last_applied += 1;
+            println!("Applying commit: {}", commit_index);
+            let entry = log.get(last_applied as usize).unwrap();
+            inner_state.apply_entry(entry);
         }
         // Do my work
         match state {
@@ -264,21 +330,21 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                 }
             }
             ServerState::Leader => {
-                let heartbeat = Message::new_heartbeat(current_term, my_id, 0, 0, 0);
-                send_all(&mut connections, &heartbeat, &mut connections_to_remove).await;
+                process_replication(
+                    &log,
+                    &mut connections,
+                    &mut connections_to_remove,
+                    &mut last_heartbeats,
+                    &mut next_index,
+                    my_id,
+                    current_term,
+                    current_term - 1,
+                    last_applied,
+                    commit_index,
+                )
+                .await;
             }
         }
-        process_replication(
-            &log,
-            &mut connections,
-            &mut connections_to_remove,
-            &mut next_index,
-            my_id,
-            current_term,
-            current_term - 1,
-            last_applied,
-            commit_index,
-        ).await;
         remove_peers(&mut connections_to_remove, &mut connections, &peers).await;
     }
     println!("Done.");

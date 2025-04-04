@@ -13,14 +13,14 @@ pub enum ServerState {
 }
 
 
-pub struct State {
+pub struct InnerState {
 
 }
 
 
-impl State {
-    pub fn new() -> State {
-        State {}
+impl InnerState {
+    pub fn new() -> InnerState {
+        InnerState {}
     }
 
     pub fn apply_entry(&mut self, entry: &Entry) {
@@ -35,9 +35,9 @@ pub enum Command {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Entry {
-    term: Term,
+    pub term: Term,
     command: Command,
-    index: Index
+    pub index: Index
 }
 
 
@@ -111,4 +111,5 @@ impl Message {
             body: MessageBody::AppendEntryResponse { success },
         }
     }
+    
 }
