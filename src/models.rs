@@ -57,7 +57,7 @@ pub enum MessageBody {
         entries: Vec<Entry>,
         leader_commit: Index,
     },
-    AppendEntryResponse {
+    Response {
         success: bool,
     },
 }
@@ -105,10 +105,10 @@ impl Message {
         }
     }
 
-    pub fn new_append_entry_response(term: Term, success: bool) -> Message {
+    pub fn new_response(term: Term, success: bool) -> Message {
         Message {
             term,
-            body: MessageBody::AppendEntryResponse { success },
+            body: MessageBody::Response { success },
         }
     }
     

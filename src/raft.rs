@@ -58,6 +58,39 @@ async fn listen_for_peers(peers: Arc<Mutex<HashSet<IpAddr>>>, sender: Sender<(Tc
     }
 }
 
+fn receive_messages(
+    connections: &mut HashMap<IpAddr, TcpStream>,
+    connections_to_remove: &mut HashSet<IpAddr>,
+    messages_buffer: &mut Vec<(IpAddr, Message)>,
+) {
+    let mut buf = [0u8; 1024];
+    for (ip, connection) in connections.iter_mut() {
+        let received = connection.try_read(&mut buf);
+        match received {
+            Ok(0) => {
+                println!("Closing connection to {}", ip);
+                connections_to_remove.insert(*ip);
+            }
+            Ok(readed) => match (serde_json::from_slice::<Message>(&buf[0..readed])) {
+                Ok(message) => {
+                    messages_buffer.push((*ip, message));
+                }
+                Err(e) => {
+                    println!("Error Deserializing message: {}", e);
+                    // connections_to_remove.insert(*ip);
+                }
+            },
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::WouldBlock => continue,
+                _ => {
+                    println!("Error receiving message: {}", e);
+                    connections_to_remove.insert(*ip);
+                }
+            },
+        }
+    }
+}
+
 async fn send_all(
     connections: &mut HashMap<IpAddr, TcpStream>,
     message: &Message,
@@ -151,28 +184,50 @@ async fn process_replication<'a>(
     }
 }
 
-async fn reply_to_append_entry_response(
+async fn reply(
     connection: &mut TcpStream,
     connection_ip: &IpAddr,
     term: Term,
     success: bool,
     connections_to_delete: &mut HashSet<IpAddr>,
 ) {
-    let data = serde_json::to_vec(&Message::new_append_entry_response(term, success)).unwrap();
+    let data = serde_json::to_vec(&Message::new_response(term, success)).unwrap();
     if let Err(e) = connection.write_all(&data).await {
         connections_to_delete.insert(*connection_ip);
     }
 }
+
+
+pub fn check_log_consistency(log: &Vec<Entry>, prev_log_index: Index, prev_log_term: Term) -> bool {
+    if prev_log_index >= log.len() as Index {
+        return false;
+    }
+    if prev_log_index > 0 && log[prev_log_index as usize].term != prev_log_term {
+        return false;
+    }
+    return true;
+}
+
+
+pub fn apply_to_state_machine(log: &Vec<Entry>, commit_index: &Index, last_applied: &mut Index, inner_state: &mut InnerState) {
+    if commit_index > last_applied {
+        *last_applied += 1;
+        println!("Applying commit: {}", commit_index);
+        let entry = log.get(*last_applied as usize).unwrap();
+        inner_state.apply_entry(entry);
+    }
+}
+
 
 pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Receiver<()>) {
     let peers = Arc::new(Mutex::new(HashSet::new()));
     let (stream_sender, mut new_connections) = channel::<(TcpStream, IpAddr)>(3);
     tokio::spawn(listen_for_peers(peers.clone(), stream_sender.clone()));
     tokio::spawn(create_peers(receiver, peers.clone(), stream_sender));
+    let mut messages_buffer = Vec::<(IpAddr, Message)>::new();
 
     let mut connections = HashMap::<IpAddr, TcpStream>::new();
     let mut connections_to_remove = HashSet::<IpAddr>::new();
-    let mut buf = [0u8; 1024];
     let mut rng = rand::rng();
     let mut inner_state = InnerState::new();
     let mut last_heartbeats: HashMap<IpAddr, Instant> = HashMap::new();
@@ -181,19 +236,19 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
     let mut state = ServerState::Follower;
     let my_id = uuid::Uuid::new_v4();
 
+    // raft basic state
     let mut current_term = 0;
-    let mut election_instant = Instant::now();
+    let mut voted_for: Option<NodeId> = None;
     let mut log = Vec::<Entry>::new();
-    println!("My election timeout: {:#?}", election_timeout);
 
     let mut commit_index = 0; // index of highest log entry known to be commited
     let mut last_applied = 0; // index of highest log entry applied to state machine
 
+    let mut election_instant = Instant::now();
+    println!("My election timeout: {:#?}", election_timeout);
+
     let mut next_index = HashMap::<IpAddr, Index>::new();
     let mut match_index = HashMap::<IpAddr, Index>::new();
-
-    let mut self_votes = 0;
-    let mut total_votes = 0;
 
     'main: loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -220,103 +275,61 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
             continue;
         }
         // receive messages
-        for (ip, connection) in connections.iter_mut() {
-            let received = connection.try_read(&mut buf);
-            match received {
-                Ok(0) => {
-                    println!("Closing connection to {}", ip);
-                    connections_to_remove.insert(*ip);
-                }
-                Ok(readed) => match serde_json::from_slice::<Message>(&buf[0..readed]) {
-                    Ok(message) => {
-                        if message.term > current_term {
-                            current_term = message.term;
-                            state = ServerState::Follower;
-                            election_instant = Instant::now();
-                            println!("I am the follower!");
-                        } else if message.term < current_term {
-                            continue;
-                        }
-                        match message.body {
-                            MessageBody::AppendEntry { mut entries, .. } => {
-                                match state {
-                                    ServerState::Leader => {
-                                        commit_index = log.len() as Index - 1;
-                                        log.append(&mut entries);
-                                        println!("I am the leader!");
-                                    }
-                                    ServerState::Candidate => {
-                                        println!("I am the candidate!");
-                                        state = ServerState::Follower;
-                                    }
-                                    ServerState::Follower => {
-                                        reply_to_append_entry_response(
-                                            connection,
-                                            ip,
-                                            message.term,
-                                            true,
-                                            &mut connections_to_remove,
-                                        )
-                                        .await;
-                                    }
-                                }
-                                election_instant = Instant::now();
-                            }
-                            MessageBody::RequestVote {
-                                candidate_id,
-                                last_log_index,
-                                last_log_term,
-                                ..
-                            } => {
-                                if candidate_id == my_id
-                                    && last_log_index == log.len() as Index - 1
-                                    && last_log_term == log[log.len() - 1].term
-                                {
-                                    self_votes += 1;
-                                }
-                                total_votes += 1;
-                            }
-                            MessageBody::AppendEntryResponse { success }
-                                if state == ServerState::Leader =>
-                            {
-                                if success {
-                                    next_index.insert(*ip, log.len() as Index);
-                                    match_index.insert(*ip, log.len() as Index);
-                                } else {
-                                    next_index.entry(*ip).and_modify(|e| *e -= 1);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    Err(e) => println!("Error deserializing message: {}", e),
-                },
-                Err(e) => match e.kind() {
-                    std::io::ErrorKind::WouldBlock => continue,
-                    _ => {
-                        println!("Error receiving message: {}", e);
-                        connections_to_remove.insert(*ip);
-                    }
-                },
-            }
-        }
-        if commit_index > last_applied {
-            last_applied += 1;
-            println!("Applying commit: {}", commit_index);
-            let entry = log.get(last_applied as usize).unwrap();
-            inner_state.apply_entry(entry);
-        }
+        receive_messages(&mut connections, &mut connections_to_remove, &mut messages_buffer);
         // Do my work
         match state {
             ServerState::Follower => {
+                for (ip, message) in messages_buffer.drain(..) {
+                    match message.body {
+                        MessageBody::AppendEntry { term, leader_id, prev_log_index, prev_log_term, mut entries, leader_commit } => {
+                            election_instant = Instant::now();
+                            if message.term < current_term || check_log_consistency(&log, prev_log_index, prev_log_term) {
+                                reply(&mut connections[&ip], &ip, term, false, &mut connections_to_remove).await;
+                                continue;
+                            }
+                            // append entries if any
+                            log.append(&mut entries);
+                            // update commit index
+                            if leader_commit > commit_index {
+                                commit_index = leader_commit;
+                            }
+                            // apply state
+                            apply_to_state_machine(&log, &commit_index, &mut last_applied, &mut inner_state);
+                            reply(&mut connections[&ip], &ip, term, true, &mut connections_to_remove).await;
+                        }
+                        MessageBody::RequestVote { term , candidate_id, last_log_index, last_log_term } => {
+                            if message.term < current_term {
+                                reply(&mut connections[&ip], &ip, message.term, false, &mut connections_to_remove).await;
+                                continue;
+                            }
+                            if (voted_for.is_none() || voted_for.unwrap() == candidate_id) && check_log_consistency(&log, last_log_index, last_log_term) {
+                                reply(&mut connections[&ip], &ip, message.term, true, &mut connections_to_remove).await;
+                                voted_for = Some(candidate_id);
+                                election_instant = Instant::now();
+                            }
+                            reply(&mut connections[&ip], &ip, message.term, false, &mut connections_to_remove).await;
+                        }
+                        _ => (),
+                    }
+                    if message.term > current_term {
+                        current_term = message.term;
+                        election_instant = Instant::now();
+                    }
+                }
                 if Instant::now().duration_since(election_instant) > election_timeout {
                     println!("I am the candidate!");
                     state = ServerState::Candidate;
-                    total_votes = 0;
-                    self_votes = 0;
                 }
             }
             ServerState::Candidate => {
+                for message in messages_buffer.drain(..) {
+                    if message.term > current_term {
+                        current_term = message.term;
+                        election_instant = Instant::now();
+                        state = ServerState::Follower;
+                        continue;
+                    }
+                }
                 if self_votes > total_votes / 2 {
                     println!("I am the leader!");
                     state = ServerState::Leader;
@@ -330,6 +343,14 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                 }
             }
             ServerState::Leader => {
+                for message in messages_buffer.drain(..) {
+                    if message.term > current_term {
+                        current_term = message.term;
+                        election_instant = Instant::now();
+                        state = ServerState::Follower;
+                        continue;
+                    }
+                }
                 process_replication(
                     &log,
                     &mut connections,
