@@ -41,6 +41,13 @@ pub struct Entry {
 }
 
 
+impl Entry {
+    pub fn new_command(term: Term, command: Command, index: Index) -> Entry {
+        Entry { term, command, index }
+    }
+}
+
+
 #[derive(Serialize, Deserialize)]
 pub enum MessageBody {
     RequestVote {
@@ -57,7 +64,13 @@ pub enum MessageBody {
         entries: Vec<Entry>,
         leader_commit: Index,
     },
-    Response {
+    Command {
+        command: Command
+    },
+    RequestVoteResponse {
+        success: bool,
+    },
+    AppendEntryResponse {
         success: bool,
     },
 }
@@ -105,10 +118,17 @@ impl Message {
         }
     }
 
-    pub fn new_response(term: Term, success: bool) -> Message {
+    pub fn new_request_vote_response(term: Term, success: bool) -> Message {
         Message {
             term,
-            body: MessageBody::Response { success },
+            body: MessageBody::RequestVoteResponse { success },
+        }
+    }
+
+    pub fn new_append_entry_response(term: Term, success: bool) -> Message {
+        Message {
+            term,
+            body: MessageBody::AppendEntryResponse { success },
         }
     }
     
