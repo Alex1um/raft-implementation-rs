@@ -28,12 +28,12 @@ impl InnerState {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Command {
 }
 
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Entry {
     pub term: Term,
     command: Command,
@@ -48,7 +48,7 @@ impl Entry {
 }
 
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize,Debug)]
 pub enum MessageBody {
     RequestVote {
         term: Term,
@@ -75,7 +75,7 @@ pub enum MessageBody {
     },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Message {
     pub term: Term,
     pub body: MessageBody,

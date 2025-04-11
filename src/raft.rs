@@ -17,6 +17,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use uuid::Uuid;
 use std::collections::VecDeque;
+use serde::Deserialize;
 
 async fn create_peers(
     mut receiver: Receiver<SocketAddr>,
@@ -73,22 +74,42 @@ fn receive_messages(
                 println!("Closing connection to {}", ip);
                 connections_to_remove.insert(*ip);
             }
-            Ok(readed) => match serde_json::from_slice::<Message>(&buf[0..readed]) {
-                Ok(message) => {
+            Ok(readed) => {
+                let mut deserializer = serde_json::Deserializer::from_slice(&buf[0..readed]);
+                loop {
+                    match Message::deserialize(&mut deserializer) {
+                        Ok(message) => {
+                            messages_buffer.push_back((*ip, message));
+                        }
+                        Err(e) => {
+                            if !e.is_eof() {
+                                println!("Error Deserializing message: {}", e);
+                                // connections_to_remove.insert(*ip);
+                            }
+                            break;
+                        }
+                    }
+                }
+                while let Ok(message) = Message::deserialize(&mut deserializer) {
                     messages_buffer.push_back((*ip, message));
+                    // match message {
+                    //     Ok(message) => {
+                    //         messages_buffer.push_back((*ip, message));
+                    //     }
+                    //     Err(e) => {
+                    //         println!("Error Deserializing message: {}", e);
+                    //         // connections_to_remove.insert(*ip);
+                    //     }
+                    // }
                 }
-                Err(e) => {
-                    println!("Error Deserializing message: {}", e);
-                    // connections_to_remove.insert(*ip);
-                }
-            },
+            }
             Err(e) => match e.kind() {
                 std::io::ErrorKind::WouldBlock => continue,
                 _ => {
                     println!("Error receiving message: {}", e);
                     connections_to_remove.insert(*ip);
                 }
-            },
+            }
         }
     }
 }
