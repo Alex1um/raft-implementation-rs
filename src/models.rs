@@ -1,8 +1,10 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub type Term = u64;
-pub type Index = u64;
+pub type Index = i64;
 pub type NodeId = Uuid;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -12,43 +14,65 @@ pub enum ServerState {
     Leader,
 }
 
-
 pub struct InnerState {
-
+    hmap: HashMap<String, String>,
 }
-
 
 impl InnerState {
     pub fn new() -> InnerState {
-        InnerState {}
+        InnerState {
+            hmap: HashMap::new(),
+        }
     }
 
     pub fn apply_entry(&mut self, entry: &Entry) {
-        
+        match &entry.command {
+            Command::SetValue { key, value } => {
+                self.hmap.insert(key.clone(), value.clone());
+            }
+        }
     }
+
+    pub fn get_value(&self, key: &String) -> Option<String> {
+        self.hmap.get(key).cloned()
+    }
+}
+
+pub enum FrontEndCommand {
+    SetValue { key: String, value: String },
+    GetValue { key: String },
+}
+
+#[derive(Debug)]
+pub enum FrontEndCommandResponse {
+    Ok,
+    Value(String),
+    NotFound,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Command {
+    SetValue { key: String, value: String },
 }
-
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Entry {
     pub term: Term,
     command: Command,
-    pub index: Index
+    pub index: Index,
 }
-
 
 impl Entry {
     pub fn new_command(term: Term, command: Command, index: Index) -> Entry {
-        Entry { term, command, index }
+        Entry {
+            term,
+            command,
+            index,
+        }
     }
 }
 
-
-#[derive(Serialize, Deserialize,Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum MessageBody {
     RequestVote {
         term: Term,
@@ -65,7 +89,7 @@ pub enum MessageBody {
         leader_commit: Index,
     },
     Command {
-        command: Command
+        command: Command,
     },
     RequestVoteResponse {
         success: bool,
@@ -106,7 +130,12 @@ impl Message {
         }
     }
 
-    pub fn new_request_vote(term: Term, candidate_id: Uuid, last_log_index: Index, last_log_term: Term) -> Message {
+    pub fn new_request_vote(
+        term: Term,
+        candidate_id: Uuid,
+        last_log_index: Index,
+        last_log_term: Term,
+    ) -> Message {
         Message {
             term,
             body: MessageBody::RequestVote {
@@ -131,5 +160,4 @@ impl Message {
             body: MessageBody::AppendEntryResponse { success },
         }
     }
-    
 }

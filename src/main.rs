@@ -15,8 +15,8 @@ use signal_handler::setup_signal_handler;
 async fn main() {
     let (_, signal_receiver) = setup_signal_handler().await;
     let (receiver, send_handle, recv_handle) = run_self_finder().await;
-    let http_server_handle = rocket().await;
-    run_raft(receiver, signal_receiver).await;
+    let (front_end_command_receiver, front_end_response_sender, http_server_handle) = rocket().await;
+    run_raft(receiver, signal_receiver, front_end_command_receiver, front_end_response_sender).await;
     let _ = send_handle.abort();
     let _ = recv_handle.abort();
     let _ = http_server_handle.await;

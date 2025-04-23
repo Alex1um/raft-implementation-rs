@@ -4,10 +4,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use crate::consts::{HEARTBEAT_INTERVAL, MAX_ELECTION_TIMEOUT, MIN_ELECTION_TIMEOUT, MIN_NODES};
 use crate::models::*;
-use rand::seq::index;
-use rand::{TryCryptoRng, prelude::*};
-use rocket::http::Iter;
-use serde::de::Visitor;
+use rand::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
@@ -302,15 +299,15 @@ pub async fn start_election(
         (log.len() - 1) as Index, 
         log
         .last()
-        .and_then(|l| Some(l.term as Index))
-        .unwrap_or(0 as Index)
+        .and_then(|l| Some(l.term as Term))
+        .unwrap_or(0 as Term)
     );
     send_all(connections, &msg, connections_to_remove).await;
     *vote_count = 1;
 }
 
 
-pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Receiver<()>) {
+pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Receiver<()>, mut front_end_command_receiver: Receiver<FrontEndCommand>, mut front_end_response_sender: Sender<FrontEndCommandResponse>) {
     let peers = Arc::new(Mutex::new(HashSet::new()));
     let (stream_sender, mut new_connections) = channel::<(TcpStream, IpAddr)>(3);
     tokio::spawn(listen_for_peers(peers.clone(), stream_sender.clone()));
@@ -347,6 +344,24 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
         tokio::time::sleep(Duration::from_millis(50)).await;
         if let Ok(_) = signal_receiver.try_recv() {
             break;
+        }
+        // front end commands
+        while let Some(command) = front_end_command_receiver.try_recv().ok() {
+            match command {
+                FrontEndCommand::SetValue { key, value } => {
+                    let entry = Entry::new_command(current_term, Command::SetValue { key, value }, log.len() as Index);
+                    log.push(entry);
+                    println!("log: {:#?}", log);
+                }
+                FrontEndCommand::GetValue { key } => {
+                    let value = inner_state.get_value(&key);
+                    if let Some(value) = value {
+                        front_end_response_sender.send(FrontEndCommandResponse::Value(value)).await.unwrap();
+                    } else {
+                        front_end_response_sender.send(FrontEndCommandResponse::NotFound).await.unwrap();
+                    }
+                }
+            }
         }
         // setup new connections
         loop {
