@@ -160,7 +160,7 @@ async fn process_replication<'a>(
     let mut heartbeat: Option<Vec<u8>> = None;
     for (ip, connection) in connections.iter_mut() {
         let index = next_index.entry(*ip).or_insert(0);
-        if last_log_index > *index {
+        if !log.is_empty() && last_log_index > *index {
             let entries = log[*index as usize..].to_vec();
             let message = Message::new(
                 current_term,
@@ -294,7 +294,7 @@ pub async fn start_election(
     connections_to_remove: &mut HashSet<IpAddr>,
 ) {
     *current_term += 1;
-    *voted_for = Some(my_id);
+    *voted_for = None;
     *election_instant = Instant::now();
     let msg = Message::new_request_vote(
         *current_term, 
@@ -392,7 +392,8 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                         }
                         MessageBody::RequestVote { term , candidate_id, last_log_index, last_log_term } => {
                             if message.term >= current_term && (voted_for.is_none() || voted_for.unwrap() == candidate_id) && is_log_up_to_date(&log, last_log_index, last_log_term) {
-                                grant_vote(&candidate_id, &ip, connections.get_mut(&ip).unwrap(), message.term, &mut voted_for, &mut election_instant, &mut connections_to_remove).await
+                                grant_vote(&candidate_id, &ip, connections.get_mut(&ip).unwrap(), message.term, &mut voted_for, &mut election_instant, &mut connections_to_remove).await;
+                                println!("voted for {}", candidate_id);
                             }
                             reply_request_vote(connections.get_mut(&ip).unwrap(), &ip, message.term, false, &mut connections_to_remove).await;
                         }
@@ -400,25 +401,33 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                     }
                 }
                 if Instant::now().duration_since(election_instant) > election_timeout {
-                    println!("I am the candidate!");
+                    println!("Timeout... I am the candidate!");
                     state = ServerState::Candidate;
                 }
             }
             ServerState::Candidate => {
                 if Instant::now().duration_since(election_instant) > election_timeout {
+                    println!("Timeout... I am the candidate!");
                     start_election(&mut current_term, &mut voted_for, &mut election_instant, &mut vote_count, my_id, &log, &mut connections, &mut connections_to_remove).await;
                 }
                 while let Some((ip, message)) = messages_buffer.pop_front() {
                     match message.body {
                         MessageBody::AppendEntry { .. } => {
                             if message.term > current_term {
+                                println!("Timeout... I am the follower!");
                                 state = ServerState::Follower;
                                 continue 'main;
                             }
                         }
-                        MessageBody::RequestVote { .. } => {
+                        MessageBody::RequestVote { term , candidate_id, last_log_index, last_log_term } => {
                             if message.term > current_term {
+                                println!("Timeout... I am the follower!");
                                 state = ServerState::Follower;
+                                if message.term >= current_term && (voted_for.is_none() || voted_for.unwrap() == candidate_id) && is_log_up_to_date(&log, last_log_index, last_log_term) {
+                                    grant_vote(&candidate_id, &ip, connections.get_mut(&ip).unwrap(), message.term, &mut voted_for, &mut election_instant, &mut connections_to_remove).await;
+                                    println!("voted for {}", candidate_id);
+                                }
+                                reply_request_vote(connections.get_mut(&ip).unwrap(), &ip, message.term, false, &mut connections_to_remove).await;
                                 continue 'main;
                             }
                         }
@@ -427,7 +436,9 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                                 continue;
                             }
                             vote_count += 1;
+                            println!("Vote granted!");
                             if vote_count >= (MIN_NODES - 1) / 2 {
+                                println!("Timeout... I am the leader!");
                                 state = ServerState::Leader;
                                 continue 'main;
                             }
@@ -444,6 +455,7 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                                 reply_append_entry(connections.get_mut(&ip).unwrap(), &ip, term, false, &mut connections_to_remove).await;
                                 continue;
                             } else if message.term > current_term {
+                                println!("Timeout... I am the follower!");
                                 state = ServerState::Follower;
                                 continue 'main;
                             }
@@ -453,12 +465,18 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                                 reply_request_vote(connections.get_mut(&ip).unwrap(), &ip, term, false, &mut connections_to_remove).await;
                                 continue;
                             } else if message.term > current_term {
+                                println!("Timeout... I am the follower!");
                                 state = ServerState::Follower;
+                                if message.term >= current_term && (voted_for.is_none() || voted_for.unwrap() == candidate_id) && is_log_up_to_date(&log, last_log_index, last_log_term) {
+                                    grant_vote(&candidate_id, &ip, connections.get_mut(&ip).unwrap(), message.term, &mut voted_for, &mut election_instant, &mut connections_to_remove).await;
+                                    println!("voted for {}", candidate_id);
+                                }
+                                reply_request_vote(connections.get_mut(&ip).unwrap(), &ip, message.term, false, &mut connections_to_remove).await;
                                 continue 'main;
                             }
                         }
                         MessageBody::Command { command } => {
-                            let command_index = log.len() as Index;
+                            let command_index = log.len() as Index - 1;
                             log.append(&mut vec![Entry::new_command(current_term, command, command_index as Index)]);
                             apply_to_state_machine(&log, &command_index, &mut last_applied, &mut inner_state);
                         }
