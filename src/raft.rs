@@ -436,6 +436,9 @@ pub async fn run_raft(
                         } => {
                             election_instant = Instant::now();
                             leader_ip = Some(ip);
+                            if entries.is_empty() {
+                                continue;
+                            }
                             if message.term < current_term
                                 || !check_log_consistency(&log, prev_log_index, prev_log_term)
                             {
@@ -726,6 +729,7 @@ pub async fn run_raft(
                                 match_index
                                     .entry(ip)
                                     .and_modify(|index| *index = last_applied_index);
+                                println!("none last applid: {}", node_last_applied.unwrap());
                             } else {
                                 next_index.entry(ip).and_modify(|index| {
                                     if *index > 0 {
@@ -740,6 +744,7 @@ pub async fn run_raft(
                                     match_index_is_bigger_count += 1;
                                 }
                             }
+                            println!("match_index_is_bigger_count: {}", match_index_is_bigger_count);
                             if match_index_is_bigger_count >= (MIN_NODES - 1) / 2 {
                                 commit_index = Some(std::cmp::min(
                                     *match_index.values().max().unwrap(),
