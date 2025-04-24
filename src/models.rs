@@ -86,7 +86,7 @@ pub enum MessageBody {
         prev_log_index: Option<Index>,
         prev_log_term: Option<Term>,
         entries: Vec<Entry>,
-        leader_commit: Index,
+        leader_commit: Option<Index>,
     },
     Command {
         command: Command,
@@ -114,7 +114,6 @@ impl Message {
     pub fn new_heartbeat(
         term: Term,
         leader_id: Uuid,
-        leader_commit: Index,
     ) -> Message {
         Message {
             term,
@@ -124,7 +123,7 @@ impl Message {
                 prev_log_index: None,
                 prev_log_term: None,
                 entries: Vec::new(),
-                leader_commit,
+                leader_commit: None,
             },
         }
     }
@@ -135,7 +134,7 @@ impl Message {
         prev_log_index: Option<Index>,
         prev_log_term: Option<Term>,
         entries: Vec<Entry>,
-        leader_commit: Index
+        leader_commit: Option<Index>
     ) -> Message {
         Message {
             term,

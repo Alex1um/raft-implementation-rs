@@ -153,7 +153,7 @@ async fn process_replication<'a>(
     next_index: &mut HashMap<IpAddr, Index>,
     leader_id: Uuid,
     current_term: Term,
-    commit_index: Index,
+    commit_index: Option<Index>,
 ) {
     let last_log_index = log.len() as Index - 1;
     let mut heartbeat: Option<Vec<u8>> = None;
@@ -199,7 +199,6 @@ async fn process_replication<'a>(
                 serde_json::to_vec(&Message::new_heartbeat(
                     current_term,
                     leader_id,
-                    commit_index,
                 ))
                 .unwrap(),
             );
@@ -277,18 +276,27 @@ pub fn is_log_up_to_date(log: &Vec<Entry>, prev_log_index: Index, prev_log_term:
 
 pub fn apply_to_state_machine(
     log: &Vec<Entry>,
-    commit_index: &Index,
-    last_applied: &mut Index,
+    commit_index: &Option<Index>,
+    last_applied: &mut Option<Index>,
     inner_state: &mut InnerState,
 ) {
-    for log in log
-        .iter()
-        .skip(*last_applied as usize + 1)
-        .take(*commit_index as usize - *last_applied as usize)
-    {
+    let mut applied_logs = *last_applied.get_or_insert(0);
+    let log_iter = match (*last_applied, *commit_index) {
+        (Some(last_applied), Some(commit_index)) => log
+            .iter()
+            .skip(last_applied as usize + 1)
+            .take(commit_index as usize - last_applied as usize),
+        (None, Some(commit_index)) => log.iter().skip(0).take(commit_index as usize),
+        (_, None) => return,
+    };
+    let mut applied_logs = 0;
+    for log in log_iter {
         println!("Applying log: {:?}", log);
         inner_state.apply_entry(log);
-        *last_applied += 1;
+        applied_logs += 1;
+    }
+    if applied_logs > 0 {
+        last_applied.replace(applied_logs);
     }
 }
 
@@ -372,8 +380,8 @@ pub async fn run_raft(
     let mut voted_for: Option<NodeId> = None;
     let mut log = Vec::<Entry>::new();
 
-    let mut commit_index = 0; // index of highest log entry known to be commited on all
-    let mut last_applied = 0; // index of highest log entry applied to state machine
+    let mut commit_index: Option<Index> = None; // index of highest log entry known to be commited on all
+    let mut last_applied: Option<Index> = None; // index of highest log entry applied to state machine
 
     let mut election_instant = Instant::now();
     println!("My election timeout: {:#?}", election_timeout);
@@ -451,8 +459,10 @@ pub async fn run_raft(
                                 log.append(&mut entries);
                             }
                             // update commit index
-                            if leader_commit > commit_index {
-                                commit_index = leader_commit;
+                            match (leader_commit, commit_index) {
+                                (Some(leader_commit_val), Some(commit_index_val)) if leader_commit_val > commit_index_val => commit_index = leader_commit,
+                                (Some(leader_commit), None) => commit_index = Some(leader_commit),
+                                _ => (),
                             }
                             // apply state
                             apply_to_state_machine(
@@ -704,12 +714,6 @@ pub async fn run_raft(
                                 command,
                                 command_index,
                             )]);
-                            apply_to_state_machine(
-                                &log,
-                                &command_index,
-                                &mut last_applied,
-                                &mut inner_state,
-                            );
                         }
                         MessageBody::AppendEntryResponse {
                             success,
@@ -732,15 +736,15 @@ pub async fn run_raft(
                             }
                             let mut match_index_is_bigger_count = 0;
                             for (ip, index) in match_index.iter() {
-                                if index > &commit_index {
+                                if commit_index.is_none() || index > &commit_index.unwrap() {
                                     match_index_is_bigger_count += 1;
                                 }
                             }
                             if match_index_is_bigger_count >= (MIN_NODES - 1) / 2 {
-                                commit_index = std::cmp::min(
+                                commit_index = Some(std::cmp::min(
                                     *match_index.values().max().unwrap(),
                                     log.len() as Index,
-                                );
+                                ));
                             }
                             apply_to_state_machine(
                                 &log,
@@ -766,12 +770,6 @@ pub async fn run_raft(
                                 .send(FrontEndCommandResponse::Ok)
                                 .await
                                 .unwrap();
-                            apply_to_state_machine(
-                                &log,
-                                &index,
-                                &mut last_applied,
-                                &mut inner_state,
-                            );
                         }
                         FrontEndCommand::GetValue { key } => {
                             let value = inner_state.get_value(&key);
