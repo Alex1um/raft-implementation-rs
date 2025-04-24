@@ -43,4 +43,12 @@ mod tests {
         println!("msg1: {:?}", message1);
         println!("msg2: {:?}", message2);
     }
+
+    #[test]
+    fn desserialize_apend_entries() {
+        let append_entries = r#"{"AppendEntry":{"term":3,"leader_id":"397fdc1d-67ed-4e76-9ea4-a0611aa8b6ba","prev_log_index":null,"prev_log_term":null,"entries":[{"term":1,"command":{"SetValue":{"key":"1","value":"1"}},"index":0},{"term":1,"command":{"SetValue":{"key":"1","value":"1"}},"index":1}],"leader_commit":0}}"#;
+        let mut deserializer = serde_json::Deserializer::from_str(append_entries);
+        let message = Message::deserialize(&mut deserializer).unwrap();
+        println!("{:?}", message);
+    }
 }

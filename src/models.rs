@@ -129,6 +129,20 @@ impl Message {
         }
     }
 
+    pub fn new_append_entry(
+        term: Term,
+        leader_id: Uuid,
+        prev_log_index: Option<Index>,
+        prev_log_term: Option<Term>,
+        entries: Vec<Entry>,
+        leader_commit: Index
+    ) -> Message {
+        Message {
+            term,
+            body: MessageBody::AppendEntry { term, leader_id, prev_log_index, prev_log_term, entries, leader_commit }
+        }
+    }
+
     pub fn new_request_vote(
         term: Term,
         candidate_id: Uuid,

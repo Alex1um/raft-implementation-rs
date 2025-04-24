@@ -5,6 +5,8 @@ use std::{net::SocketAddr, sync::Arc};
 use crate::consts::{HEARTBEAT_INTERVAL, MAX_ELECTION_TIMEOUT, MIN_ELECTION_TIMEOUT, MIN_NODES};
 use crate::models::*;
 use rand::prelude::*;
+use serde::Deserialize;
+use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
@@ -13,8 +15,6 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use uuid::Uuid;
-use std::collections::VecDeque;
-use serde::Deserialize;
 
 async fn create_peers(
     mut receiver: Receiver<SocketAddr>,
@@ -80,7 +80,11 @@ fn receive_messages(
                         }
                         Err(e) => {
                             if !e.is_eof() {
-                                println!("Error Deserializing message: {}", e);
+                                println!(
+                                    "Error Deserializing message: {}; raw: {}",
+                                    e,
+                                    String::from_utf8_lossy(&buf[0..readed])
+                                );
                                 // connections_to_remove.insert(*ip);
                             }
                             break;
@@ -106,7 +110,7 @@ fn receive_messages(
                     println!("Error receiving message: {}", e);
                     connections_to_remove.insert(*ip);
                 }
-            }
+            },
         }
     }
 }
@@ -155,27 +159,26 @@ async fn process_replication<'a>(
     let mut heartbeat: Option<Vec<u8>> = None;
     for (ip, connection) in connections.iter_mut() {
         let index = next_index.entry(*ip).or_insert(0);
-        if !log.is_empty() && last_log_index > *index {
-            let message = {
+        if !log.is_empty() && last_log_index >= *index {
+            let message= {
                 if *index == 0 {
-                    MessageBody::AppendEntry {
-                        term: current_term,
+                    Message::new_append_entry(
+                        current_term,
                         leader_id,
-                        prev_log_index: None,
-                        prev_log_term: None,
-                        entries: log.clone(),
-                        leader_commit: commit_index,
-                    }
+                        None,
+                        None,
+                        log.clone(),
+                        commit_index,
+                    )
                 } else {
-                    println!("{}", *index);
-                    MessageBody::AppendEntry {
-                        term: current_term,
+                    Message::new_append_entry(
+                        current_term,
                         leader_id,
-                        prev_log_index: Some(*index - 1),
-                        prev_log_term: Some(log[(*index - 1) as usize].term),
-                        entries: log[*index as usize..].to_vec(),
-                        leader_commit: commit_index,
-                    }
+                        Some(*index - 1),
+                        Some(log[(*index - 1) as usize].term),
+                        log[*index as usize..].to_vec(),
+                        commit_index,
+                    )
                 }
             };
             let data = serde_json::to_vec(&message).unwrap();
@@ -231,13 +234,22 @@ async fn reply_append_entry(
     last_entry_index: Option<Index>,
     connections_to_remove: &mut HashSet<IpAddr>,
 ) {
-    let data = serde_json::to_vec(&Message::new_append_entry_response(term, success, last_entry_index)).unwrap();
+    let data = serde_json::to_vec(&Message::new_append_entry_response(
+        term,
+        success,
+        last_entry_index,
+    ))
+    .unwrap();
     if let Err(_) = connection.write_all(&data).await {
         connections_to_remove.insert(*connection_ip);
     }
 }
 
-pub fn check_log_consistency(log: &Vec<Entry>, prev_log_index: Option<Index>, prev_log_term: Option<Term>) -> bool {
+pub fn check_log_consistency(
+    log: &Vec<Entry>,
+    prev_log_index: Option<Index>,
+    prev_log_term: Option<Term>,
+) -> bool {
     if let (Some(prev_log_index), Some(prev_log_term)) = (prev_log_index, prev_log_term) {
         if prev_log_index >= log.len() as Index {
             return false;
@@ -248,7 +260,6 @@ pub fn check_log_consistency(log: &Vec<Entry>, prev_log_index: Option<Index>, pr
     }
     return true;
 }
-
 
 pub fn is_log_up_to_date(log: &Vec<Entry>, prev_log_index: Index, prev_log_term: Term) -> bool {
     if let Some(last_entry) = log.last() {
@@ -264,9 +275,17 @@ pub fn is_log_up_to_date(log: &Vec<Entry>, prev_log_index: Index, prev_log_term:
     }
 }
 
-
-pub fn apply_to_state_machine(log: &Vec<Entry>, commit_index: &Index, last_applied: &mut Index, inner_state: &mut InnerState) {
-    for log in log.iter().skip(*last_applied as usize + 1).take(*commit_index as usize - *last_applied as usize) {
+pub fn apply_to_state_machine(
+    log: &Vec<Entry>,
+    commit_index: &Index,
+    last_applied: &mut Index,
+    inner_state: &mut InnerState,
+) {
+    for log in log
+        .iter()
+        .skip(*last_applied as usize + 1)
+        .take(*commit_index as usize - *last_applied as usize)
+    {
         println!("Applying log: {:?}", log);
         inner_state.apply_entry(log);
         *last_applied += 1;
@@ -274,19 +293,18 @@ pub fn apply_to_state_machine(log: &Vec<Entry>, commit_index: &Index, last_appli
 }
 
 pub async fn grant_vote(
-    new_vote: &NodeId, 
-    ip: &IpAddr, 
-    connection: &mut TcpStream, 
-    term: Term, 
-    voted_for: &mut Option<NodeId>, 
+    new_vote: &NodeId,
+    ip: &IpAddr,
+    connection: &mut TcpStream,
+    term: Term,
+    voted_for: &mut Option<NodeId>,
     election_instant: &mut Instant,
-    connections_to_remove: &mut HashSet<IpAddr>
+    connections_to_remove: &mut HashSet<IpAddr>,
 ) {
     *voted_for = Some(*new_vote);
     *election_instant = Instant::now();
     reply_request_vote(connection, ip, term, true, connections_to_remove).await
 }
-
 
 pub async fn start_election(
     current_term: &mut Term,
@@ -302,33 +320,36 @@ pub async fn start_election(
     *voted_for = None;
     *election_instant = Instant::now();
     let msg = Message::new_request_vote(
-        *current_term, 
-        my_id, 
-        (log.len() - 1) as Index, 
-        log
-        .last()
-        .and_then(|l| Some(l.term as Term))
-        .unwrap_or(0 as Term)
+        *current_term,
+        my_id,
+        (log.len() - 1) as Index,
+        log.last()
+            .and_then(|l| Some(l.term as Term))
+            .unwrap_or(0 as Term),
     );
     send_all(connections, &msg, connections_to_remove).await;
     *vote_count = 1;
 }
 
-
-async fn send_command_to_leader(leader_ip: IpAddr, term: Term, command: Command, connections: &mut HashMap<IpAddr, TcpStream>) -> Result<(), std::io::Error> {
+async fn send_command_to_leader(
+    leader_ip: IpAddr,
+    term: Term,
+    command: Command,
+    connections: &mut HashMap<IpAddr, TcpStream>,
+) -> Result<(), std::io::Error> {
     if let Some(connection) = connections.get_mut(&leader_ip) {
-        let data = serde_json::to_vec(&Message::new_command(
-            term,
-            command,
-        ))
-        .unwrap();
-        return connection.write_all(&data).await
+        let data = serde_json::to_vec(&Message::new_command(term, command)).unwrap();
+        return connection.write_all(&data).await;
     }
     Ok(())
 }
 
-
-pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Receiver<()>, mut front_end_command_receiver: Receiver<FrontEndCommand>, mut front_end_response_sender: Sender<FrontEndCommandResponse>) {
+pub async fn run_raft(
+    receiver: Receiver<SocketAddr>,
+    mut signal_receiver: Receiver<()>,
+    mut front_end_command_receiver: Receiver<FrontEndCommand>,
+    mut front_end_response_sender: Sender<FrontEndCommandResponse>,
+) {
     let peers = Arc::new(Mutex::new(HashSet::new()));
     let (stream_sender, mut new_connections) = channel::<(TcpStream, IpAddr)>(3);
     tokio::spawn(listen_for_peers(peers.clone(), stream_sender.clone()));
@@ -387,38 +408,99 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
             continue;
         }
         // receive messages
-        receive_messages(&mut connections, &mut connections_to_remove, &mut messages_buffer);
+        receive_messages(
+            &mut connections,
+            &mut connections_to_remove,
+            &mut messages_buffer,
+        );
         // Do my work
         match state {
             ServerState::Follower => {
                 while let Some((ip, message)) = messages_buffer.pop_front() {
                     match message.body {
-                        MessageBody::AppendEntry { term, leader_id, prev_log_index, prev_log_term, mut entries, leader_commit } => {
+                        MessageBody::AppendEntry {
+                            term,
+                            leader_id,
+                            prev_log_index,
+                            prev_log_term,
+                            mut entries,
+                            leader_commit,
+                        } => {
                             election_instant = Instant::now();
-                            if message.term < current_term || check_log_consistency(&log, prev_log_index, prev_log_term) {
-                                reply_append_entry(connections.get_mut(&ip).unwrap(), &ip, term, false, None, &mut connections_to_remove).await;
+                            leader_ip = Some(ip);
+                            if message.term < current_term
+                                || !check_log_consistency(&log, prev_log_index, prev_log_term)
+                            {
+                                reply_append_entry(
+                                    connections.get_mut(&ip).unwrap(),
+                                    &ip,
+                                    term,
+                                    false,
+                                    None,
+                                    &mut connections_to_remove,
+                                )
+                                .await;
                                 continue;
                             }
-                            leader_ip = Some(ip);
                             // append entries if any
                             if let Some(prev_log_index) = prev_log_index {
                                 log.truncate(prev_log_index as usize + 1);
-                            } 
-                            log.append(&mut entries);
+                            }
+                            if entries.len() > 0 {
+                                println!("Appending entries: {}", entries.len());
+                                log.append(&mut entries);
+                            }
                             // update commit index
                             if leader_commit > commit_index {
                                 commit_index = leader_commit;
                             }
                             // apply state
-                            apply_to_state_machine(&log, &commit_index, &mut last_applied, &mut inner_state);
-                            reply_append_entry(connections.get_mut(&ip).unwrap(), &ip, term, true, Some(log.len() as Index - 1), &mut connections_to_remove).await;
+                            apply_to_state_machine(
+                                &log,
+                                &commit_index,
+                                &mut last_applied,
+                                &mut inner_state,
+                            );
+                            reply_append_entry(
+                                connections.get_mut(&ip).unwrap(),
+                                &ip,
+                                term,
+                                true,
+                                Some(log.len() as Index - 1),
+                                &mut connections_to_remove,
+                            )
+                            .await;
                         }
-                        MessageBody::RequestVote { term , candidate_id, last_log_index, last_log_term } => {
-                            if message.term >= current_term && (voted_for.is_none() || voted_for.unwrap() == candidate_id) && is_log_up_to_date(&log, last_log_index, last_log_term) {
-                                grant_vote(&candidate_id, &ip, connections.get_mut(&ip).unwrap(), message.term, &mut voted_for, &mut election_instant, &mut connections_to_remove).await;
+                        MessageBody::RequestVote {
+                            term,
+                            candidate_id,
+                            last_log_index,
+                            last_log_term,
+                        } => {
+                            if message.term >= current_term
+                                && (voted_for.is_none() || voted_for.unwrap() == candidate_id)
+                                && is_log_up_to_date(&log, last_log_index, last_log_term)
+                            {
+                                grant_vote(
+                                    &candidate_id,
+                                    &ip,
+                                    connections.get_mut(&ip).unwrap(),
+                                    message.term,
+                                    &mut voted_for,
+                                    &mut election_instant,
+                                    &mut connections_to_remove,
+                                )
+                                .await;
                                 println!("voted for {}", candidate_id);
                             }
-                            reply_request_vote(connections.get_mut(&ip).unwrap(), &ip, message.term, false, &mut connections_to_remove).await;
+                            reply_request_vote(
+                                connections.get_mut(&ip).unwrap(),
+                                &ip,
+                                message.term,
+                                false,
+                                &mut connections_to_remove,
+                            )
+                            .await;
                         }
                         _ => (),
                     }
@@ -429,8 +511,17 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                             if let Some(lead_ip) = leader_ip {
                                 let command = Command::SetValue { key, value };
                                 println!("sending command to leader: {:?}", command);
-                                send_command_to_leader(lead_ip, current_term, command, &mut connections).await;
-                                front_end_response_sender.send(FrontEndCommandResponse::Ok).await.unwrap();
+                                let _ = send_command_to_leader(
+                                    lead_ip,
+                                    current_term,
+                                    command,
+                                    &mut connections,
+                                )
+                                .await;
+                                front_end_response_sender
+                                    .send(FrontEndCommandResponse::Ok)
+                                    .await
+                                    .unwrap();
                             } else {
                                 println!("No leader ip");
                             }
@@ -438,9 +529,15 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                         FrontEndCommand::GetValue { key } => {
                             let value = inner_state.get_value(&key);
                             if let Some(value) = value {
-                                front_end_response_sender.send(FrontEndCommandResponse::Value(value)).await.unwrap();
+                                front_end_response_sender
+                                    .send(FrontEndCommandResponse::Value(value))
+                                    .await
+                                    .unwrap();
                             } else {
-                                front_end_response_sender.send(FrontEndCommandResponse::NotFound).await.unwrap();
+                                front_end_response_sender
+                                    .send(FrontEndCommandResponse::NotFound)
+                                    .await
+                                    .unwrap();
                             }
                         }
                     }
@@ -453,7 +550,17 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
             ServerState::Candidate => {
                 if Instant::now().duration_since(election_instant) > election_timeout {
                     println!("Timeout... I am the candidate!");
-                    start_election(&mut current_term, &mut voted_for, &mut election_instant, &mut vote_count, my_id, &log, &mut connections, &mut connections_to_remove).await;
+                    start_election(
+                        &mut current_term,
+                        &mut voted_for,
+                        &mut election_instant,
+                        &mut vote_count,
+                        my_id,
+                        &log,
+                        &mut connections,
+                        &mut connections_to_remove,
+                    )
+                    .await;
                 }
                 while let Some((ip, message)) = messages_buffer.pop_front() {
                     match message.body {
@@ -465,16 +572,40 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                                 continue 'main;
                             }
                         }
-                        MessageBody::RequestVote { term , candidate_id, last_log_index, last_log_term } => {
+                        MessageBody::RequestVote {
+                            term,
+                            candidate_id,
+                            last_log_index,
+                            last_log_term,
+                        } => {
                             if message.term > current_term {
                                 println!("Timeout... I am the follower!");
                                 state = ServerState::Follower;
                                 leader_ip = Some(ip);
-                                if message.term >= current_term && (voted_for.is_none() || voted_for.unwrap() == candidate_id) && is_log_up_to_date(&log, last_log_index, last_log_term) {
-                                    grant_vote(&candidate_id, &ip, connections.get_mut(&ip).unwrap(), message.term, &mut voted_for, &mut election_instant, &mut connections_to_remove).await;
+                                if message.term >= current_term
+                                    && (voted_for.is_none() || voted_for.unwrap() == candidate_id)
+                                    && is_log_up_to_date(&log, last_log_index, last_log_term)
+                                {
+                                    grant_vote(
+                                        &candidate_id,
+                                        &ip,
+                                        connections.get_mut(&ip).unwrap(),
+                                        message.term,
+                                        &mut voted_for,
+                                        &mut election_instant,
+                                        &mut connections_to_remove,
+                                    )
+                                    .await;
                                     println!("voted for {}", candidate_id);
                                 }
-                                reply_request_vote(connections.get_mut(&ip).unwrap(), &ip, message.term, false, &mut connections_to_remove).await;
+                                reply_request_vote(
+                                    connections.get_mut(&ip).unwrap(),
+                                    &ip,
+                                    message.term,
+                                    false,
+                                    &mut connections_to_remove,
+                                )
+                                .await;
                                 continue 'main;
                             }
                         }
@@ -497,9 +628,20 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
             ServerState::Leader => {
                 while let Some((ip, message)) = messages_buffer.pop_front() {
                     match message.body {
-                        MessageBody::AppendEntry { term, leader_id, prev_log_index, prev_log_term, mut entries, leader_commit } => {
+                        MessageBody::AppendEntry {
+                            term,
+                            ..
+                        } => {
                             if message.term < current_term {
-                                reply_append_entry(connections.get_mut(&ip).unwrap(), &ip, term, false, None, &mut connections_to_remove).await;
+                                reply_append_entry(
+                                    connections.get_mut(&ip).unwrap(),
+                                    &ip,
+                                    term,
+                                    false,
+                                    None,
+                                    &mut connections_to_remove,
+                                )
+                                .await;
                                 continue;
                             } else if message.term > current_term {
                                 println!("Timeout... I am the follower!");
@@ -508,33 +650,84 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                                 continue 'main;
                             }
                         }
-                        MessageBody::RequestVote { term, candidate_id, last_log_index, last_log_term } => {
+                        MessageBody::RequestVote {
+                            term,
+                            candidate_id,
+                            last_log_index,
+                            last_log_term,
+                        } => {
                             if message.term < current_term {
-                                reply_request_vote(connections.get_mut(&ip).unwrap(), &ip, term, false, &mut connections_to_remove).await;
+                                reply_request_vote(
+                                    connections.get_mut(&ip).unwrap(),
+                                    &ip,
+                                    term,
+                                    false,
+                                    &mut connections_to_remove,
+                                )
+                                .await;
                                 continue;
                             } else if message.term > current_term {
                                 println!("Timeout... I am the follower!");
                                 state = ServerState::Follower;
-                                if message.term >= current_term && (voted_for.is_none() || voted_for.unwrap() == candidate_id) && is_log_up_to_date(&log, last_log_index, last_log_term) {
-                                    grant_vote(&candidate_id, &ip, connections.get_mut(&ip).unwrap(), message.term, &mut voted_for, &mut election_instant, &mut connections_to_remove).await;
+                                if message.term >= current_term
+                                    && (voted_for.is_none() || voted_for.unwrap() == candidate_id)
+                                    && is_log_up_to_date(&log, last_log_index, last_log_term)
+                                {
+                                    grant_vote(
+                                        &candidate_id,
+                                        &ip,
+                                        connections.get_mut(&ip).unwrap(),
+                                        message.term,
+                                        &mut voted_for,
+                                        &mut election_instant,
+                                        &mut connections_to_remove,
+                                    )
+                                    .await;
                                     println!("voted for {}", candidate_id);
                                 }
-                                reply_request_vote(connections.get_mut(&ip).unwrap(), &ip, message.term, false, &mut connections_to_remove).await;
+                                reply_request_vote(
+                                    connections.get_mut(&ip).unwrap(),
+                                    &ip,
+                                    message.term,
+                                    false,
+                                    &mut connections_to_remove,
+                                )
+                                .await;
                                 continue 'main;
                             }
                         }
                         MessageBody::Command { command } => {
                             let command_index = log.len() as Index;
                             println!("New command: {:?}", command);
-                            log.append(&mut vec![Entry::new_command(current_term, command, command_index)]);
-                            apply_to_state_machine(&log, &command_index, &mut last_applied, &mut inner_state);
+                            log.append(&mut vec![Entry::new_command(
+                                current_term,
+                                command,
+                                command_index,
+                            )]);
+                            apply_to_state_machine(
+                                &log,
+                                &command_index,
+                                &mut last_applied,
+                                &mut inner_state,
+                            );
                         }
-                        MessageBody::AppendEntryResponse { success, last_log_index: node_last_applied } => {
+                        MessageBody::AppendEntryResponse {
+                            success,
+                            last_log_index: node_last_applied,
+                        } => {
                             if let Some(last_applied_index) = node_last_applied {
-                                next_index.entry(ip).and_modify(|index| *index = last_applied_index + 1);
-                                match_index.entry(ip).and_modify(|index| *index = last_applied_index);
+                                next_index
+                                    .entry(ip)
+                                    .and_modify(|index| *index = last_applied_index + 1);
+                                match_index
+                                    .entry(ip)
+                                    .and_modify(|index| *index = last_applied_index);
                             } else {
-                                next_index.entry(ip).and_modify(|index| *index -= 1 as Index);
+                                next_index.entry(ip).and_modify(|index| {
+                                    if *index > 0 {
+                                        *index -= 1 as Index
+                                    }
+                                });
                                 continue;
                             }
                             let mut match_index_is_bigger_count = 0;
@@ -544,10 +737,17 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                                 }
                             }
                             if match_index_is_bigger_count >= (MIN_NODES - 1) / 2 {
-                                commit_index = std::cmp::min(*match_index.values().max().unwrap(), log.len() as Index);
+                                commit_index = std::cmp::min(
+                                    *match_index.values().max().unwrap(),
+                                    log.len() as Index,
+                                );
                             }
-                            apply_to_state_machine(&log, &commit_index, &mut last_applied, &mut inner_state);
-
+                            apply_to_state_machine(
+                                &log,
+                                &commit_index,
+                                &mut last_applied,
+                                &mut inner_state,
+                            );
                         }
                         _ => {}
                     }
@@ -556,17 +756,35 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                     match command {
                         FrontEndCommand::SetValue { key, value } => {
                             let index = log.len() as Index;
-                            let entry = Entry::new_command(current_term, Command::SetValue { key, value }, index);
+                            let entry = Entry::new_command(
+                                current_term,
+                                Command::SetValue { key, value },
+                                index,
+                            );
                             log.push(entry);
-                            front_end_response_sender.send(FrontEndCommandResponse::Ok).await.unwrap();
-                            apply_to_state_machine(&log, &index, &mut last_applied, &mut inner_state);
+                            front_end_response_sender
+                                .send(FrontEndCommandResponse::Ok)
+                                .await
+                                .unwrap();
+                            apply_to_state_machine(
+                                &log,
+                                &index,
+                                &mut last_applied,
+                                &mut inner_state,
+                            );
                         }
                         FrontEndCommand::GetValue { key } => {
                             let value = inner_state.get_value(&key);
                             if let Some(value) = value {
-                                front_end_response_sender.send(FrontEndCommandResponse::Value(value)).await.unwrap();
+                                front_end_response_sender
+                                    .send(FrontEndCommandResponse::Value(value))
+                                    .await
+                                    .unwrap();
                             } else {
-                                front_end_response_sender.send(FrontEndCommandResponse::NotFound).await.unwrap();
+                                front_end_response_sender
+                                    .send(FrontEndCommandResponse::NotFound)
+                                    .await
+                                    .unwrap();
                             }
                         }
                     }
