@@ -156,23 +156,28 @@ async fn process_replication<'a>(
     for (ip, connection) in connections.iter_mut() {
         let index = next_index.entry(*ip).or_insert(0);
         if !log.is_empty() && last_log_index > *index {
-            let entries = log[*index as usize..].to_vec();
-            let (prev_log_index, prev_log_term) = if *index == 0 {
-                (None, None)
-            } else {
-                (Some(*index - 1), Some(log[(*index - 1) as usize].term))
+            let message = {
+                if *index == 0 {
+                    MessageBody::AppendEntry {
+                        term: current_term,
+                        leader_id,
+                        prev_log_index: None,
+                        prev_log_term: None,
+                        entries: log.clone(),
+                        leader_commit: commit_index,
+                    }
+                } else {
+                    println!("{}", *index);
+                    MessageBody::AppendEntry {
+                        term: current_term,
+                        leader_id,
+                        prev_log_index: Some(*index - 1),
+                        prev_log_term: Some(log[(*index - 1) as usize].term),
+                        entries: log[*index as usize..].to_vec(),
+                        leader_commit: commit_index,
+                    }
+                }
             };
-            let message = Message::new(
-                current_term,
-                MessageBody::AppendEntry {
-                    term: current_term,
-                    leader_id,
-                    prev_log_index,
-                    prev_log_term,
-                    entries,
-                    leader_commit: commit_index,
-                },
-            );
             let data = serde_json::to_vec(&message).unwrap();
             match connection.write_all(&data).await {
                 Ok(_) => {}
@@ -232,12 +237,14 @@ async fn reply_append_entry(
     }
 }
 
-pub fn check_log_consistency(log: &Vec<Entry>, prev_log_index: Index, prev_log_term: Term) -> bool {
-    if prev_log_index >= log.len() as Index {
-        return false;
-    }
-    if prev_log_index > 0 && log[prev_log_index as usize].term != prev_log_term {
-        return false;
+pub fn check_log_consistency(log: &Vec<Entry>, prev_log_index: Option<Index>, prev_log_term: Option<Term>) -> bool {
+    if let (Some(prev_log_index), Some(prev_log_term)) = (prev_log_index, prev_log_term) {
+        if prev_log_index >= log.len() as Index {
+            return false;
+        }
+        if prev_log_index > 0 && log[prev_log_index as usize].term != prev_log_term {
+            return false;
+        }
     }
     return true;
 }
@@ -308,17 +315,16 @@ pub async fn start_election(
 }
 
 
-async fn send_command_to_leader(leader_ip: IpAddr, term: Term, command: Command, connections: &mut HashMap<IpAddr, TcpStream>) {
+async fn send_command_to_leader(leader_ip: IpAddr, term: Term, command: Command, connections: &mut HashMap<IpAddr, TcpStream>) -> Result<(), std::io::Error> {
     if let Some(connection) = connections.get_mut(&leader_ip) {
         let data = serde_json::to_vec(&Message::new_command(
             term,
             command,
         ))
         .unwrap();
-        if let Err(e) = connection.write_all(&data).await {
-            println!("Error sending message: {}", e);
-        }
+        return connection.write_all(&data).await
     }
+    Ok(())
 }
 
 
@@ -389,23 +395,23 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                     match message.body {
                         MessageBody::AppendEntry { term, leader_id, prev_log_index, prev_log_term, mut entries, leader_commit } => {
                             election_instant = Instant::now();
-                            if let (Some(prev_log_index), Some(prev_log_term)) = (prev_log_index, prev_log_term) {
-                                if message.term < current_term || check_log_consistency(&log, prev_log_index, prev_log_term) {
-                                    reply_append_entry(connections.get_mut(&ip).unwrap(), &ip, term, false, None, &mut connections_to_remove).await;
-                                    continue;
-                                }
-                                leader_ip = Some(ip);
-                                // append entries if any
-                                log.truncate(prev_log_index as usize + 1);
-                                log.append(&mut entries);
-                                // update commit index
-                                if leader_commit > commit_index {
-                                    commit_index = leader_commit;
-                                }
-                                // apply state
-                                apply_to_state_machine(&log, &commit_index, &mut last_applied, &mut inner_state);
-                                reply_append_entry(connections.get_mut(&ip).unwrap(), &ip, term, true, Some(log.len() as Index - 1), &mut connections_to_remove).await;
+                            if message.term < current_term || check_log_consistency(&log, prev_log_index, prev_log_term) {
+                                reply_append_entry(connections.get_mut(&ip).unwrap(), &ip, term, false, None, &mut connections_to_remove).await;
+                                continue;
                             }
+                            leader_ip = Some(ip);
+                            // append entries if any
+                            if let Some(prev_log_index) = prev_log_index {
+                                log.truncate(prev_log_index as usize + 1);
+                            } 
+                            log.append(&mut entries);
+                            // update commit index
+                            if leader_commit > commit_index {
+                                commit_index = leader_commit;
+                            }
+                            // apply state
+                            apply_to_state_machine(&log, &commit_index, &mut last_applied, &mut inner_state);
+                            reply_append_entry(connections.get_mut(&ip).unwrap(), &ip, term, true, Some(log.len() as Index - 1), &mut connections_to_remove).await;
                         }
                         MessageBody::RequestVote { term , candidate_id, last_log_index, last_log_term } => {
                             if message.term >= current_term && (voted_for.is_none() || voted_for.unwrap() == candidate_id) && is_log_up_to_date(&log, last_log_index, last_log_term) {
@@ -424,6 +430,7 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                                 let command = Command::SetValue { key, value };
                                 println!("sending command to leader: {:?}", command);
                                 send_command_to_leader(lead_ip, current_term, command, &mut connections).await;
+                                front_end_response_sender.send(FrontEndCommandResponse::Ok).await.unwrap();
                             } else {
                                 println!("No leader ip");
                             }
@@ -551,6 +558,7 @@ pub async fn run_raft(receiver: Receiver<SocketAddr>, mut signal_receiver: Recei
                             let index = log.len() as Index;
                             let entry = Entry::new_command(current_term, Command::SetValue { key, value }, index);
                             log.push(entry);
+                            front_end_response_sender.send(FrontEndCommandResponse::Ok).await.unwrap();
                             apply_to_state_machine(&log, &index, &mut last_applied, &mut inner_state);
                         }
                         FrontEndCommand::GetValue { key } => {
