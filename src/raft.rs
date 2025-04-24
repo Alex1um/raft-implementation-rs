@@ -199,6 +199,7 @@ async fn process_replication<'a>(
                 serde_json::to_vec(&Message::new_heartbeat(
                     current_term,
                     leader_id,
+                    commit_index
                 ))
                 .unwrap(),
             );
@@ -280,18 +281,17 @@ pub fn apply_to_state_machine(
     last_applied: &mut Option<Index>,
     inner_state: &mut InnerState,
 ) {
-    let mut applied_logs = *last_applied.get_or_insert(0);
     let log_iter = match (*last_applied, *commit_index) {
         (Some(last_applied), Some(commit_index)) => log
             .iter()
             .skip(last_applied as usize + 1)
-            .take(commit_index as usize - last_applied as usize),
-        (None, Some(commit_index)) => log.iter().skip(0).take(commit_index as usize),
+            .take(commit_index as usize - last_applied as usize + 1),
+        (None, Some(commit_index)) => log.iter().skip(0).take(commit_index as usize + 1),
         (_, None) => return,
     };
     let mut applied_logs = 0;
     for log in log_iter {
-        println!("Applying log: {:?}", log);
+        println!("Applying log to state: {:?}", log);
         inner_state.apply_entry(log);
         applied_logs += 1;
     }
@@ -436,6 +436,19 @@ pub async fn run_raft(
                         } => {
                             election_instant = Instant::now();
                             leader_ip = Some(ip);
+                            // update commit index
+                            match (leader_commit, commit_index) {
+                                (Some(leader_commit_val), Some(commit_index_val)) if leader_commit_val > commit_index_val => commit_index = leader_commit,
+                                (Some(leader_commit), None) => commit_index = Some(leader_commit),
+                                _ => (),
+                            }
+                            // apply state
+                            apply_to_state_machine(
+                                &log,
+                                &commit_index,
+                                &mut last_applied,
+                                &mut inner_state,
+                            );
                             if entries.is_empty() {
                                 continue;
                             }
@@ -461,19 +474,6 @@ pub async fn run_raft(
                                 println!("Appending entries: {}", entries.len());
                                 log.append(&mut entries);
                             }
-                            // update commit index
-                            match (leader_commit, commit_index) {
-                                (Some(leader_commit_val), Some(commit_index_val)) if leader_commit_val > commit_index_val => commit_index = leader_commit,
-                                (Some(leader_commit), None) => commit_index = Some(leader_commit),
-                                _ => (),
-                            }
-                            // apply state
-                            apply_to_state_machine(
-                                &log,
-                                &commit_index,
-                                &mut last_applied,
-                                &mut inner_state,
-                            );
                             reply_append_entry(
                                 connections.get_mut(&ip).unwrap(),
                                 &ip,
@@ -725,10 +725,12 @@ pub async fn run_raft(
                             if let Some(last_applied_index) = node_last_applied {
                                 next_index
                                     .entry(ip)
-                                    .and_modify(|index| *index = last_applied_index + 1);
+                                    .and_modify(|index| *index = last_applied_index + 1)
+                                    .or_insert(last_applied_index + 1);
                                 match_index
                                     .entry(ip)
-                                    .and_modify(|index| *index = last_applied_index);
+                                    .and_modify(|index| *index = last_applied_index)
+                                    .or_insert(last_applied_index);
                                 println!("none last applid: {}", node_last_applied.unwrap());
                             } else {
                                 next_index.entry(ip).and_modify(|index| {

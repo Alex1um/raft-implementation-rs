@@ -114,6 +114,7 @@ impl Message {
     pub fn new_heartbeat(
         term: Term,
         leader_id: Uuid,
+        leader_commit: Option<Index>
     ) -> Message {
         Message {
             term,
@@ -123,7 +124,7 @@ impl Message {
                 prev_log_index: None,
                 prev_log_term: None,
                 entries: Vec::new(),
-                leader_commit: None,
+                leader_commit: leader_commit,
             },
         }
     }
