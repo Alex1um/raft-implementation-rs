@@ -83,8 +83,8 @@ pub enum MessageBody {
     AppendEntry {
         term: Term,
         leader_id: NodeId,
-        prev_log_index: Index,
-        prev_log_term: Term,
+        prev_log_index: Option<Index>,
+        prev_log_term: Option<Term>,
         entries: Vec<Entry>,
         leader_commit: Index,
     },
@@ -96,6 +96,7 @@ pub enum MessageBody {
     },
     AppendEntryResponse {
         success: bool,
+        last_log_index: Option<Index>,
     },
 }
 
@@ -113,8 +114,6 @@ impl Message {
     pub fn new_heartbeat(
         term: Term,
         leader_id: Uuid,
-        prev_log_index: Index,
-        prev_log_term: Term,
         leader_commit: Index,
     ) -> Message {
         Message {
@@ -122,8 +121,8 @@ impl Message {
             body: MessageBody::AppendEntry {
                 term,
                 leader_id,
-                prev_log_index,
-                prev_log_term,
+                prev_log_index: None,
+                prev_log_term: None,
                 entries: Vec::new(),
                 leader_commit,
             },
@@ -154,10 +153,17 @@ impl Message {
         }
     }
 
-    pub fn new_append_entry_response(term: Term, success: bool) -> Message {
+    pub fn new_append_entry_response(term: Term, success: bool, last_log_index: Option<Index>) -> Message {
         Message {
             term,
-            body: MessageBody::AppendEntryResponse { success },
+            body: MessageBody::AppendEntryResponse { success, last_log_index },
+        }
+    }
+
+    pub fn new_command(term: Term, command: Command) -> Message {
+        Message {
+            term,
+            body: MessageBody::Command { command },
         }
     }
 }

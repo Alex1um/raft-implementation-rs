@@ -39,7 +39,7 @@ fn index() -> content::RawHtml<&'static str> {
             <input type="submit" value="Submit">
         </form>
         <hr>
-        <form action="/get" method="get">
+        <form action="/get" method="post">
             <label for="name">Name:</label>
             <input type="text" id="name" name="name"><br><br>
             <input type="submit" value="Submit">
@@ -65,7 +65,7 @@ async fn set(command: Form<SetValueForm>, communicator: &State<CommandCommunicat
     return format!("{:?}", response);
 }
 
-#[get("/get", data = "<command>")]
+#[post("/get", data = "<command>")]
 async fn get(command: Form<GetValueForm>, communicator: &State<CommandCommunicator>) -> String {
     let command = FrontEndCommand::GetValue {
         key: command.name.clone(),
