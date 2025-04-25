@@ -44,6 +44,10 @@ fn index() -> content::RawHtml<&'static str> {
             <input type="text" id="name" name="name"><br><br>
             <input type="submit" value="Submit">
         </form>
+        <hr>
+        <a href="/lock">lock</a>
+        <hr>
+        <a href="/unlock">unlock</a>
         "#,
     )
 }
@@ -81,6 +85,34 @@ async fn get(command: Form<GetValueForm>, communicator: &State<CommandCommunicat
     return format!("{:?}", response);
 }
 
+#[get("/lock")]
+async fn lock(communicator: &State<CommandCommunicator>) -> String {
+    let command = FrontEndCommand::Lock;
+    communicator.command_sender.send(command).await.unwrap();
+    let response = communicator
+        .response_receiver
+        .lock()
+        .await
+        .recv()
+        .await
+        .unwrap();
+    return format!("{:?}", response);
+}
+
+#[get("/unlock")]
+async fn unlock(communicator: &State<CommandCommunicator>) -> String {
+    let command = FrontEndCommand::Unlock;
+    communicator.command_sender.send(command).await.unwrap();
+    let response = communicator
+        .response_receiver
+        .lock()
+        .await
+        .recv()
+        .await
+        .unwrap();
+    return format!("{:?}", response);
+}
+
 #[get("/stop")]
 fn stop() -> &'static str {
     process::exit(0);
@@ -99,7 +131,7 @@ pub async fn rocket() -> (
     };
     let send_handle = tokio::spawn(async move {
         rocket::build()
-            .mount("/", routes![index, stop, set, get])
+            .mount("/", routes![index, stop, set, get, lock, unlock])
             .manage(communicator)
             .launch()
             .await

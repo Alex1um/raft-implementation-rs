@@ -9,4 +9,5 @@ pub const BIND_PORT: u16 = 48666;
 pub const MIN_ELECTION_TIMEOUT: Duration = Duration::from_millis(150);
 pub const MAX_ELECTION_TIMEOUT: Duration = Duration::from_millis(300);
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
+pub const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MIN_NODES: usize = 3;

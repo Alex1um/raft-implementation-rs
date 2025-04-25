@@ -1,5 +1,5 @@
 use std::net::IpAddr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use std::{net::SocketAddr, sync::Arc};
 
 use crate::consts::{HEARTBEAT_INTERVAL, MAX_ELECTION_TIMEOUT, MIN_ELECTION_TIMEOUT, MIN_NODES};
@@ -160,7 +160,7 @@ async fn process_replication<'a>(
     for (ip, connection) in connections.iter_mut() {
         let index = next_index.entry(*ip).or_insert(0);
         if !log.is_empty() && last_log_index >= *index {
-            let message= {
+            let message = {
                 if *index == 0 {
                     Message::new_append_entry(
                         current_term,
@@ -199,7 +199,7 @@ async fn process_replication<'a>(
                 serde_json::to_vec(&Message::new_heartbeat(
                     current_term,
                     leader_id,
-                    commit_index
+                    commit_index,
                 ))
                 .unwrap(),
             );
@@ -439,7 +439,11 @@ pub async fn run_raft(
                             leader_ip = Some(ip);
                             // update commit index
                             match (leader_commit, commit_index) {
-                                (Some(leader_commit_val), Some(commit_index_val)) if leader_commit_val > commit_index_val => commit_index = leader_commit,
+                                (Some(leader_commit_val), Some(commit_index_val))
+                                    if leader_commit_val > commit_index_val =>
+                                {
+                                    commit_index = leader_commit
+                                }
                                 (Some(leader_commit), None) => commit_index = Some(leader_commit),
                                 _ => (),
                             }
@@ -523,7 +527,7 @@ pub async fn run_raft(
                     match command {
                         FrontEndCommand::SetValue { key, value } => {
                             if let Some(lead_ip) = leader_ip {
-                                let command = Command::SetValue { key, value };
+                                let command = Command::new_set_value(key, value, my_id);
                                 println!("sending command to leader: {:?}", command);
                                 let _ = send_command_to_leader(
                                     lead_ip,
@@ -542,16 +546,62 @@ pub async fn run_raft(
                         }
                         FrontEndCommand::GetValue { key } => {
                             let value = inner_state.get_value(&key);
-                            if let Some(value) = value {
+                            let current_time = SystemTime::now();
+                            if inner_state.is_unlocked(&my_id, &current_time) {
+                                if let Some(value) = value {
+                                    front_end_response_sender
+                                        .send(FrontEndCommandResponse::Value(value))
+                                        .await
+                                        .unwrap();
+                                } else {
+                                    front_end_response_sender
+                                        .send(FrontEndCommandResponse::NotFound)
+                                        .await
+                                        .unwrap();
+                                }
+                            } else {
                                 front_end_response_sender
-                                    .send(FrontEndCommandResponse::Value(value))
+                                    .send(FrontEndCommandResponse::Locked)
+                                    .await
+                                    .unwrap();
+                            }
+                        }
+                        FrontEndCommand::Lock => {
+                            if let Some(lead_ip) = leader_ip {
+                                let command = Command::new_lock(my_id);
+                                println!("sending command to leader: {:?}", command);
+                                let _ = send_command_to_leader(
+                                    lead_ip,
+                                    current_term,
+                                    command,
+                                    &mut connections,
+                                )
+                                .await;
+                                front_end_response_sender
+                                    .send(FrontEndCommandResponse::Ok)
                                     .await
                                     .unwrap();
                             } else {
+                                println!("No leader ip");
+                            }
+                        }
+                        FrontEndCommand::Unlock => {
+                            if let Some(lead_ip) = leader_ip {
+                                let command = Command::new_unlock(my_id);
+                                println!("sending command to leader: {:?}", command);
+                                let _ = send_command_to_leader(
+                                    lead_ip,
+                                    current_term,
+                                    command,
+                                    &mut connections,
+                                )
+                                .await;
                                 front_end_response_sender
-                                    .send(FrontEndCommandResponse::NotFound)
+                                    .send(FrontEndCommandResponse::Ok)
                                     .await
                                     .unwrap();
+                            } else {
+                                println!("No leader ip");
                             }
                         }
                     }
@@ -642,10 +692,7 @@ pub async fn run_raft(
             ServerState::Leader => {
                 while let Some((ip, message)) = messages_buffer.pop_front() {
                     match message.body {
-                        MessageBody::AppendEntry {
-                            term,
-                            ..
-                        } => {
+                        MessageBody::AppendEntry { term, .. } => {
                             if message.term < current_term {
                                 reply_append_entry(
                                     connections.get_mut(&ip).unwrap(),
@@ -751,10 +798,16 @@ pub async fn run_raft(
                                     }
                                 }
                             }
-                            println!("match_index_is_bigger_count: {}", match_index_is_bigger_count);
+                            println!(
+                                "match_index_is_bigger_count: {}",
+                                match_index_is_bigger_count
+                            );
                             if match_index_is_bigger_count >= (MIN_NODES - 1) / 2 {
                                 commit_index = Some(min_bigger_index);
-                                println!("new commit_index: {:?}; last_applied: {:?}", commit_index, last_applied);
+                                println!(
+                                    "new commit_index: {:?}; last_applied: {:?}",
+                                    commit_index, last_applied
+                                );
                             }
                             apply_to_state_machine(
                                 &log,
@@ -772,7 +825,7 @@ pub async fn run_raft(
                             let index = log.len() as Index;
                             let entry = Entry::new_command(
                                 current_term,
-                                Command::SetValue { key, value },
+                                Command::new_set_value(key, value, my_id),
                                 index,
                             );
                             log.push(entry);
@@ -794,6 +847,32 @@ pub async fn run_raft(
                                     .await
                                     .unwrap();
                             }
+                        }
+                        FrontEndCommand::Lock => {
+                            let index = log.len() as Index;
+                            let entry = Entry::new_command(
+                                current_term,
+                                Command::new_lock(my_id),
+                                index,
+                            );
+                            log.push(entry);
+                            front_end_response_sender
+                                .send(FrontEndCommandResponse::Ok)
+                                .await
+                                .unwrap();
+                        }
+                        FrontEndCommand::Unlock => {
+                            let index = log.len() as Index;
+                            let entry = Entry::new_command(
+                                current_term,
+                                Command::new_unlock(my_id),
+                                index,
+                            );
+                            log.push(entry);
+                            front_end_response_sender
+                                .send(FrontEndCommandResponse::Ok)
+                                .await
+                                .unwrap();
                         }
                     }
                 }
