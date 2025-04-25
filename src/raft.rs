@@ -167,7 +167,7 @@ async fn process_replication<'a>(
                         leader_id,
                         None,
                         None,
-                        log.clone(),
+                        log[*index as usize..].to_vec(),
                         commit_index,
                     )
                 } else {
@@ -281,6 +281,7 @@ pub fn apply_to_state_machine(
     last_applied: &mut Option<Index>,
     inner_state: &mut InnerState,
 ) {
+    let mut applied_logs = last_applied.unwrap_or(0);
     let log_iter = match (*last_applied, *commit_index) {
         (Some(last_applied), Some(commit_index)) => log
             .iter()
@@ -289,15 +290,15 @@ pub fn apply_to_state_machine(
         (None, Some(commit_index)) => log.iter().skip(0).take(commit_index as usize + 1),
         (_, None) => return,
     };
-    let mut applied_logs = 0;
     for log in log_iter {
         println!("Applying log to state: {:?}", log);
         inner_state.apply_entry(log);
         applied_logs += 1;
     }
-    if applied_logs > 0 {
-        last_applied.replace(applied_logs);
+    if last_applied.is_none() {
+        applied_logs -= 1;
     }
+    last_applied.replace(applied_logs);
 }
 
 pub async fn grant_vote(
@@ -741,17 +742,19 @@ pub async fn run_raft(
                                 continue;
                             }
                             let mut match_index_is_bigger_count = 0;
+                            let mut min_bigger_index = 0;
                             for (ip, index) in match_index.iter() {
                                 if commit_index.is_none() || index > &commit_index.unwrap() {
                                     match_index_is_bigger_count += 1;
+                                    if *index > min_bigger_index {
+                                        min_bigger_index = *index;
+                                    }
                                 }
                             }
                             println!("match_index_is_bigger_count: {}", match_index_is_bigger_count);
                             if match_index_is_bigger_count >= (MIN_NODES - 1) / 2 {
-                                commit_index = Some(std::cmp::min(
-                                    *match_index.values().max().unwrap(),
-                                    log.len() as Index,
-                                ));
+                                commit_index = Some(min_bigger_index);
+                                println!("new commit_index: {:?}; last_applied: {:?}", commit_index, last_applied);
                             }
                             apply_to_state_machine(
                                 &log,
