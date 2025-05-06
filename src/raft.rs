@@ -63,7 +63,7 @@ fn receive_messages(
     connections_to_remove: &mut HashSet<IpAddr>,
     messages_buffer: &mut VecDeque<(IpAddr, Message)>,
 ) {
-    let mut buf = [0u8; 2048];
+    let mut buf = [0u8; 4096];
     for (ip, connection) in connections.iter_mut() {
         let received = connection.try_read(&mut buf);
         match received {
