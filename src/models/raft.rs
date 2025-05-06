@@ -1,16 +1,6 @@
-use std::{
-    collections::HashMap,
-    time::{Instant, SystemTime, UNIX_EPOCH},
-};
-
+use crate::models::base::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-use crate::consts::LOCK_TIMEOUT;
-
-pub type Term = u64;
-pub type Index = i64;
-pub type NodeId = Uuid;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub enum ServerState {
@@ -19,130 +9,10 @@ pub enum ServerState {
     Leader,
 }
 
-pub struct InnerStateLock {
-    timestep: SystemTime,
-    owner: NodeId,
-}
-
-impl InnerStateLock {
-    pub fn new(owner: NodeId) -> InnerStateLock {
-        InnerStateLock {
-            timestep: SystemTime::now(),
-            owner,
-        }
-    }
-
-    pub fn has_access(&self, id: NodeId, access_time: SystemTime) -> bool {
-        return self.owner == id
-            || access_time.duration_since(self.timestep).unwrap() > LOCK_TIMEOUT;
-    }
-}
-
-pub struct InnerState {
-    hmap: HashMap<String, String>,
-    lock: Option<InnerStateLock>,
-}
-
-impl InnerState {
-    pub fn new() -> InnerState {
-        InnerState {
-            hmap: HashMap::new(),
-            lock: None,
-        }
-    }
-
-    pub fn apply_entry(&mut self, entry: &Entry) {
-        match &entry.command {
-            Command::SetValue {
-                key,
-                value,
-                id,
-                timestamp,
-            } => {
-                if self.is_unlocked(id, timestamp) {
-                    self.hmap.insert(key.clone(), value.clone());
-                }
-            }
-            Command::Lock { id } => {
-                self.lock = Some(InnerStateLock::new(*id));
-            }
-            Command::Unlock { id } => {
-                if let Some(lock) = &self.lock {
-                    if lock.owner == *id {
-                        self.lock = None;
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn get_value(&self, key: &String) -> Option<String> {
-        self.hmap.get(key).cloned()
-    }
-
-    pub fn is_unlocked(&self, id: &NodeId, timestamp: &SystemTime) -> bool {
-        return self.lock.is_none()
-            || self
-                .lock
-                .as_ref()
-                .is_some_and(|lock| lock.has_access(*id, *timestamp));
-    }
-}
-
-pub enum FrontEndCommand {
-    SetValue { key: String, value: String },
-    GetValue { key: String },
-    Lock,
-    Unlock,
-}
-
-#[derive(Debug)]
-pub enum FrontEndCommandResponse {
-    Ok,
-    Value(String),
-    NotFound,
-    Locked,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum Command {
-    SetValue {
-        key: String,
-        value: String,
-        id: NodeId,
-        timestamp: SystemTime,
-    },
-    Lock {
-        id: NodeId,
-    },
-    Unlock {
-        id: NodeId,
-    },
-}
-
-impl Command {
-    pub fn new_set_value(key: String, value: String, id: NodeId) -> Command {
-        Command::SetValue {
-            key,
-            value,
-            id,
-            timestamp: SystemTime::now(),
-        }
-    }
-
-    pub fn new_lock(id: NodeId) -> Command {
-        Command::Lock { id }
-    }
-
-    pub fn new_unlock(id: NodeId) -> Command {
-        Command::Unlock { id }
-    }
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Entry {
     pub term: Term,
-    command: Command,
+    pub command: Command,
     pub index: Index,
 }
 

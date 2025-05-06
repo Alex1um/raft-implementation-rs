@@ -24,6 +24,11 @@ struct GetValueForm {
     name: String,
 }
 
+#[derive(FromForm)]
+struct RemoveValueForm {
+    name: String,
+}
+
 #[get("/")]
 fn index() -> content::RawHtml<&'static str> {
     content::RawHtml(
@@ -32,6 +37,7 @@ fn index() -> content::RawHtml<&'static str> {
         <a href="/stop">stop</a>
         <hr>
         <form action="/set" method="post">
+            <h3>Set Value</h3>
             <label for="name">Name:</label>
             <input type="text" id="name" name="name"><br><br>
             <label for="value">Value:</label>
@@ -40,10 +46,20 @@ fn index() -> content::RawHtml<&'static str> {
         </form>
         <hr>
         <form action="/get" method="post">
+            <h3>Get Value</h3>
             <label for="name">Name:</label>
             <input type="text" id="name" name="name"><br><br>
             <input type="submit" value="Submit">
         </form>
+        <hr>
+        <form action="/remove" method="post">
+            <h3>Remove Value</h3>
+            <label for="name">Name:</label>
+            <input type="text" id="name" name="name"><br><br>
+            <input type="submit" value="Submit">
+        </form>
+        <hr>
+        <a href="/store">storea</a>
         <hr>
         <a href="/lock">lock</a>
         <hr>
@@ -83,6 +99,41 @@ async fn get(command: Form<GetValueForm>, communicator: &State<CommandCommunicat
         .await
         .unwrap();
     return format!("{:?}", response);
+}
+
+#[post("/remove", data = "<command>")]
+async fn remove(command: Form<RemoveValueForm>, communicator: &State<CommandCommunicator>) -> String {
+    let command = FrontEndCommand::DelValue {
+        key: command.name.clone(),
+    };
+    communicator.command_sender.send(command).await.unwrap();
+    let response = communicator
+        .response_receiver
+        .lock()
+        .await
+        .recv()
+        .await
+        .unwrap();
+    return format!("{:?}", response);
+}
+
+
+#[get("/store")]
+async fn store(communicator: &State<CommandCommunicator>) -> String {
+    let command = FrontEndCommand::GetStore;
+    communicator.command_sender.send(command).await.unwrap();
+    let response = communicator
+        .response_receiver
+        .lock()
+        .await
+        .recv()
+        .await
+        .unwrap();
+    if let FrontEndCommandResponse::Store(str) = response {
+        return str;
+    } else {
+        return format!("Error {:?}", response);
+    }
 }
 
 #[get("/lock")]
@@ -131,7 +182,7 @@ pub async fn rocket() -> (
     };
     let send_handle = tokio::spawn(async move {
         rocket::build()
-            .mount("/", routes![index, stop, set, get, lock, unlock])
+            .mount("/", routes![index, stop, set, get, remove, store, lock, unlock])
             .manage(communicator)
             .launch()
             .await

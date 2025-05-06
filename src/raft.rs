@@ -63,7 +63,7 @@ fn receive_messages(
     connections_to_remove: &mut HashSet<IpAddr>,
     messages_buffer: &mut VecDeque<(IpAddr, Message)>,
 ) {
-    let mut buf = [0u8; 1024];
+    let mut buf = [0u8; 2048];
     for (ip, connection) in connections.iter_mut() {
         let received = connection.try_read(&mut buf);
         match received {
@@ -375,6 +375,7 @@ pub async fn run_raft(
     let election_timeout = rng.random_range(MIN_ELECTION_TIMEOUT..=MAX_ELECTION_TIMEOUT);
     let mut state = ServerState::Follower;
     let my_id = uuid::Uuid::new_v4();
+    println!("My uuid: {}", my_id);
 
     // raft basic state
     let mut current_term = 0;
@@ -582,6 +583,10 @@ pub async fn run_raft(
                                     .await
                                     .unwrap();
                             } else {
+                                front_end_response_sender
+                                    .send(FrontEndCommandResponse::Error("No leader ip".to_owned()))
+                                    .await
+                                    .unwrap();
                                 println!("No leader ip");
                             }
                         }
@@ -601,8 +606,42 @@ pub async fn run_raft(
                                     .await
                                     .unwrap();
                             } else {
+                                front_end_response_sender
+                                    .send(FrontEndCommandResponse::Error("No leader ip".to_owned()))
+                                    .await
+                                    .unwrap();
                                 println!("No leader ip");
                             }
+                        }
+                        FrontEndCommand::DelValue { key } => {
+                            if let Some(lead_ip) = leader_ip {
+                                let command = Command::new_del_value(key, my_id);
+                                println!("sending command to leader: {:?}", command);
+                                let _ = send_command_to_leader(
+                                    lead_ip,
+                                    current_term,
+                                    command,
+                                    &mut connections,
+                                )
+                                .await;
+                                front_end_response_sender
+                                    .send(FrontEndCommandResponse::Ok)
+                                    .await
+                                    .unwrap();
+                            } else {
+                                front_end_response_sender
+                                    .send(FrontEndCommandResponse::Error("No leader ip".to_owned()))
+                                    .await
+                                    .unwrap();
+                                println!("No leader ip");
+                            }
+                        }
+                        FrontEndCommand::GetStore => {
+                            let store = inner_state.get_store();
+                            front_end_response_sender
+                                .send(FrontEndCommandResponse::Store(store))
+                                .await
+                                .unwrap();
                         }
                     }
                 }
@@ -848,6 +887,19 @@ pub async fn run_raft(
                                     .unwrap();
                             }
                         }
+                        FrontEndCommand::DelValue { key } => {
+                            let index = log.len() as Index;
+                            let entry = Entry::new_command(
+                                current_term,
+                                Command::new_del_value(key.clone(), my_id),
+                                index,
+                            );
+                            log.push(entry);
+                            front_end_response_sender
+                                .send(FrontEndCommandResponse::Ok)
+                                .await
+                                .unwrap();
+                        }
                         FrontEndCommand::Lock => {
                             let index = log.len() as Index;
                             let entry = Entry::new_command(
@@ -871,6 +923,13 @@ pub async fn run_raft(
                             log.push(entry);
                             front_end_response_sender
                                 .send(FrontEndCommandResponse::Ok)
+                                .await
+                                .unwrap();
+                        }
+                        FrontEndCommand::GetStore => {
+                            let store = inner_state.get_store();
+                            front_end_response_sender
+                                .send(FrontEndCommandResponse::Store(store))
                                 .await
                                 .unwrap();
                         }
