@@ -413,10 +413,10 @@ pub async fn run_raft(
                 }
             }
         }
-        if connections.len() < MIN_NODES - 1 {
-            println!("not enough connections: {}", connections.len());
-            continue;
-        }
+        // if connections.len() < MIN_NODES - 1 {
+        //     println!("not enough connections: {}", connections.len());
+        //     continue;
+        // }
         // receive messages
         receive_messages(
             &mut connections,
@@ -438,6 +438,8 @@ pub async fn run_raft(
                         } => {
                             election_instant = Instant::now();
                             leader_ip = Some(ip);
+                            println!("My term is: {}", term);
+                            println!("My term is: {:?}", leader_ip);
                             // update commit index
                             match (leader_commit, commit_index) {
                                 (Some(leader_commit_val), Some(commit_index_val))
@@ -472,6 +474,7 @@ pub async fn run_raft(
                                 .await;
                                 continue;
                             }
+                            current_term = term;
                             // append entries if any
                             if let Some(prev_log_index) = prev_log_index {
                                 log.truncate(prev_log_index as usize + 1);
@@ -718,7 +721,7 @@ pub async fn run_raft(
                             }
                             vote_count += 1;
                             println!("Vote granted!");
-                            if vote_count >= (MIN_NODES - 1) / 2 {
+                            if vote_count >= MIN_NODES {
                                 println!("Timeout... I am the leader!");
                                 state = ServerState::Leader;
                                 continue 'main;
@@ -841,7 +844,7 @@ pub async fn run_raft(
                                 "match_index_is_bigger_count: {}",
                                 match_index_is_bigger_count
                             );
-                            if match_index_is_bigger_count >= (MIN_NODES - 1) / 2 {
+                            if match_index_is_bigger_count >= MIN_NODES {
                                 commit_index = Some(min_bigger_index);
                                 println!(
                                     "new commit_index: {:?}; last_applied: {:?}",
