@@ -6,7 +6,7 @@ import sys
 # Initialize the Flask application
 app = Flask(__name__)
 
-# HTML template for displaying the list of names with links
+# HTML template for displaying the table
 # Using Tailwind CSS classes for basic styling (assuming Tailwind is available or added)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -27,53 +27,72 @@ HTML_TEMPLATE = """
             min-height: 100vh; /* Minimum height of viewport */
             padding: 20px; /* Add some padding around the content */
         }
-        .container-list {
-            background-color: #ffffff; /* White background for the list container */
+        .container-table {
+            background-color: #ffffff; /* White background for the table */
             border-radius: 0.5rem; /* Rounded corners */
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); /* Subtle shadow */
             overflow: hidden; /* Hide overflowing content */
-            max-width: 600px; /* Max width for the list */
+            max-width: 800px; /* Max width for the table */
             width: 100%; /* Full width up to max-width */
-            padding: 20px; /* Padding inside the container */
         }
-        ul {
-            list-style: none; /* Remove default list bullets */
-            padding: 0; /* Remove default padding */
-            margin: 0; /* Remove default margin */
+        .container-table > table {
+            width: 100%; /* Full width up to max-width */
         }
-        li {
-            padding: 10px 0; /* Padding for list items */
-            border-bottom: 1px solid #e5e7eb; /* Light grey border at the bottom */
+        container-table {
+            background-color: #ffffff; /* White background for the table */
+            border-radius: 0.5rem; /* Rounded corners */
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); /* Subtle shadow */
+            overflow: hidden; /* Hide overflowing content */
+            max-width: 800px; /* Max width for the table */
+            width: 100%; /* Full width up to max-width */
         }
-        li:last-child {
-            border-bottom: none; /* Remove border for the last item */
+        th, td {
+            padding: 12px 15px; /* Padding for table cells */
+            text-align: left; /* Align text to the left */
         }
-        a {
-            color: #4f46e5; /* Indigo color for links */
-            text-decoration: none; /* Remove underline from links */
-            font-size: 1.1rem; /* Slightly larger font size for links */
+        th {
+            background-color: #4f46e5; /* Indigo background for header */
+            color: white; /* White text for header */
+            font-weight: bold; /* Bold font for header */
         }
-        a:hover {
-            text-decoration: underline; /* Add underline on hover */
+        tr:nth-child(even) {
+            background-color: #eef2ff; /* Light indigo background for even rows */
         }
-        h2 {
-            font-size: 1.5rem; /* Larger font size for heading */
+        tr:hover {
+            background-color: #d1d5db; /* Light grey background on hover */
+            cursor: pointer;
+        }
+        caption {
+            caption-side: top;
+            text-align: left;
+            font-size: 1.25rem; /* Larger font size for caption */
             font-weight: bold;
-            margin-bottom: 20px; /* Space below the heading */
-            color: #374151; /* Dark grey color for heading */
+            padding: 15px;
+            color: #374151; /* Dark grey color for caption */
         }
     </style>
 </head>
 <body>
-    <div class="container-list">
-        <h2>Docker Containers</h2>
-        <ul>
-            {% for container in containers %}
-            <li>
-                <a href="http://{{ container.ip }}:8000">{{ container.name }}</a>
-            </li>
-            {% endfor %}
-        </ul>
+    <div class="container-table">
+        <table>
+            <caption>Docker Container IP Addresses</caption>
+            <thead>
+                <tr>
+                    <th>Container Name</th>
+                    <th>IP Address</th>
+                    <th>Stop</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for container in containers %}
+                <tr onclick="window.location='http://{{ container.ip }}:8000'">
+                    <td>{{ container.name }}</td>
+                    <td>{{ container.ip }}</td>
+                    <td><a href="http://{{ container.ip }}:8000/stop">stop</a></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
     </div>
 </body>
 </html>
@@ -84,7 +103,7 @@ HTML_TEMPLATE = """
 @app.route('/containers')
 def list_containers():
     """
-    Fetches Docker container names and IP addresses and renders them in an HTML list with links.
+    Fetches Docker container names and IP addresses and renders them in an HTML table.
     """
     container_list = []
     try:
@@ -119,7 +138,7 @@ def list_containers():
     # Render the HTML template with container data
     return render_template_string(HTML_TEMPLATE, containers=container_list)
 
-# Route to get container information as JSON (remains the same)
+# Route to get container information as JSON
 @app.route('/api/containers')
 def list_containers_json():
     """
