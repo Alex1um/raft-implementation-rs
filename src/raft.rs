@@ -136,11 +136,15 @@ async fn remove_peers(
     ips: &mut HashSet<IpAddr>,
     connections: &mut HashMap<IpAddr, TcpStream>,
     peers: &Arc<Mutex<HashSet<IpAddr>>>,
+    next_index: &mut HashMap<IpAddr, Index>,
+    match_index: &mut HashMap<IpAddr, Index>
 ) {
     for ip in ips.iter() {
         let mut peers_locked = peers.lock().await;
         peers_locked.remove(ip);
         connections.remove(ip);
+        next_index.remove(ip);
+        match_index.remove(ip);
     }
     ips.clear();
 }
@@ -162,6 +166,7 @@ async fn process_replication<'a>(
         if !log.is_empty() && last_log_index >= *index {
             let message = {
                 if *index == 0 {
+                    println!("Replicating log from start");
                     Message::new_append_entry(
                         current_term,
                         leader_id,
@@ -281,7 +286,7 @@ pub fn apply_to_state_machine(
     last_applied: &mut Option<Index>,
     inner_state: &mut InnerState,
 ) {
-    let mut applied_logs = last_applied.unwrap_or(0);
+    // let mut applied_logs = last_applied.unwrap_or(0);
     let log_iter = match (*last_applied, *commit_index) {
         (Some(last_applied), Some(commit_index)) => log
             .iter()
@@ -293,12 +298,13 @@ pub fn apply_to_state_machine(
     for log in log_iter {
         println!("Applying log to state: {:?}", log);
         inner_state.apply_entry(log);
-        applied_logs += 1;
+        last_applied.replace(log.index);
+        // applied_logs += 1;
     }
-    if last_applied.is_none() {
-        applied_logs -= 1;
-    }
-    last_applied.replace(applied_logs);
+    // if last_applied.is_none() {
+    //     applied_logs -= 1;
+    // }
+    // last_applied.replace(applied_logs);
 }
 
 pub async fn grant_vote(
@@ -438,8 +444,8 @@ pub async fn run_raft(
                         } => {
                             election_instant = Instant::now();
                             leader_ip = Some(ip);
-                            println!("My term is: {}", term);
-                            println!("My term is: {:?}", leader_ip);
+                            // println!("My term is: {}", term);
+                            // println!("My term is: {:?}", leader_ip);
                             // update commit index
                             match (leader_commit, commit_index) {
                                 (Some(leader_commit_val), Some(commit_index_val))
@@ -499,6 +505,7 @@ pub async fn run_raft(
                             last_log_index,
                             last_log_term,
                         } => {
+                            println!("{} {} {}", message.term >= current_term, (voted_for.is_none() || voted_for.unwrap() == candidate_id), is_log_up_to_date(&log, last_log_index, last_log_term));
                             if message.term >= current_term
                                 && (voted_for.is_none() || voted_for.unwrap() == candidate_id)
                                 && is_log_up_to_date(&log, last_log_index, last_log_term)
@@ -951,7 +958,13 @@ pub async fn run_raft(
                 .await;
             }
         }
-        remove_peers(&mut connections_to_remove, &mut connections, &peers).await;
+        remove_peers(
+            &mut connections_to_remove,
+            &mut connections,
+            &peers,
+            &mut next_index,
+            &mut match_index,
+        ).await;
     }
     println!("Done.");
 }
