@@ -166,7 +166,6 @@ async fn process_replication<'a>(
         if !log.is_empty() && last_log_index >= *index {
             let message = {
                 if *index == 0 {
-                    println!("Replicating log from start");
                     Message::new_append_entry(
                         current_term,
                         leader_id,
@@ -271,7 +270,7 @@ pub fn is_log_up_to_date(log: &Vec<Entry>, prev_log_index: Index, prev_log_term:
         if prev_log_term > last_entry.term {
             return true;
         }
-        if prev_log_term == last_entry.term && prev_log_index >= log.len() as Index {
+        if prev_log_term == last_entry.term && prev_log_index >= log.len() as Index - 1 {
             return true;
         }
         return false;
@@ -487,7 +486,16 @@ pub async fn run_raft(
                             }
                             if entries.len() > 0 {
                                 println!("Appending entries: {}", entries.len());
-                                log.append(&mut entries);
+                                for entry in entries {
+                                    let entry_index = entry.index as usize;
+                                    if entry_index >= log.len() {
+                                        log.push(entry);
+                                    } else {
+                                        if log[entry_index].command != entry.command {
+                                            log[entry_index] = entry;
+                                        }
+                                    }
+                                }
                             }
                             reply_append_entry(
                                 connections.get_mut(&ip).unwrap(),

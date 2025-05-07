@@ -7,7 +7,7 @@ pub type Term = u64;
 pub type Index = i64;
 pub type NodeId = Uuid;
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     SetValue {
         key: String,
