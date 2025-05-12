@@ -311,12 +311,14 @@ pub async fn grant_vote(
     ip: &IpAddr,
     connection: &mut TcpStream,
     term: Term,
+    current_term: &mut Term,
     voted_for: &mut Option<NodeId>,
     election_instant: &mut Instant,
     connections_to_remove: &mut HashSet<IpAddr>,
 ) {
     *voted_for = Some(*new_vote);
     *election_instant = Instant::now();
+    *current_term = term;
     reply_request_vote(connection, ip, term, true, connections_to_remove).await
 }
 
@@ -399,7 +401,7 @@ pub async fn run_raft(
     let mut vote_count = 0;
 
     'main: loop {
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // tokio::time::sleep(Duration::from_millis(20)).await;
         if let Ok(_) = signal_receiver.try_recv() {
             break;
         }
@@ -443,8 +445,8 @@ pub async fn run_raft(
                         } => {
                             election_instant = Instant::now();
                             leader_ip = Some(ip);
-                            // println!("My term is: {}", term);
-                            // println!("My term is: {:?}", leader_ip);
+                            println!("My term is: {}", term);
+                            println!("My term is: {:?}", leader_ip);
                             // update commit index
                             match (leader_commit, commit_index) {
                                 (Some(leader_commit_val), Some(commit_index_val))
@@ -523,6 +525,7 @@ pub async fn run_raft(
                                     &ip,
                                     connections.get_mut(&ip).unwrap(),
                                     message.term,
+                                    &mut current_term,
                                     &mut voted_for,
                                     &mut election_instant,
                                     &mut connections_to_remove,
@@ -712,6 +715,7 @@ pub async fn run_raft(
                                         &ip,
                                         connections.get_mut(&ip).unwrap(),
                                         message.term,
+                                        &mut current_term,
                                         &mut voted_for,
                                         &mut election_instant,
                                         &mut connections_to_remove,
@@ -796,6 +800,7 @@ pub async fn run_raft(
                                         &ip,
                                         connections.get_mut(&ip).unwrap(),
                                         message.term,
+                                        &mut current_term,
                                         &mut voted_for,
                                         &mut election_instant,
                                         &mut connections_to_remove,
