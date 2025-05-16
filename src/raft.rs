@@ -6,6 +6,7 @@ use crate::consts::{HEARTBEAT_INTERVAL, MAX_ELECTION_TIMEOUT, MIN_ELECTION_TIMEO
 use crate::models::*;
 use rand::prelude::*;
 use serde::Deserialize;
+use serde_json::to_vec;
 use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -171,7 +172,7 @@ async fn process_replication<'a>(
                         leader_id,
                         None,
                         None,
-                        log[*index as usize..].to_vec(),
+                        log[*index as usize..].iter().take(2).cloned().collect(),
                         commit_index,
                     )
                 } else {
@@ -180,7 +181,7 @@ async fn process_replication<'a>(
                         leader_id,
                         Some(*index - 1),
                         Some(log[(*index - 1) as usize].term),
-                        log[*index as usize..].to_vec(),
+                        log[*index as usize..].iter().take(2).cloned().collect(),
                         commit_index,
                     )
                 }
@@ -445,8 +446,8 @@ pub async fn run_raft(
                         } => {
                             election_instant = Instant::now();
                             leader_ip = Some(ip);
-                            println!("My term is: {}", term);
-                            println!("My term is: {:?}", leader_ip);
+                            // println!("My term is: {}", term);
+                            // println!("My term is: {:?}", leader_ip);
                             // update commit index
                             match (leader_commit, commit_index) {
                                 (Some(leader_commit_val), Some(commit_index_val))
